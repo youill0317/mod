@@ -1,0 +1,14 @@
+{
+  "name": "youill0317-mods",
+  "description": "Personal Claude Code mods by youill0317.",
+  "owner": {
+    "name": "youill0317"
+  },
+  "plugins": [
+    {
+      "name": "shell-memo",
+      "source": "./shell-memo",
+      "description": "Shows a short plain-Korean memo of the running foreground shell command beside Claude Code's working spinner."
+    }
+  ]
+}
