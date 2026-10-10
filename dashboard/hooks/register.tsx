@@ -282,7 +282,7 @@ export const register: Register = (on, options) => {
       // A summary an older version of the mod wrote may hold kinds it no longer draws.
       (written?.blocks ?? [])
         .filter(block => KINDS.has(block.kind))
-        .map(block => (block.kind === 'graph' ? { ...block, nodes: fitGraph(block.nodes, columns, room) } : block))
+        .map(block => (block.kind === 'graph' ? { ...block, nodes: fitGraph(clipNodes(block.nodes, columns), columns, room) } : block))
         .map(block => ({ block, rows: blockRows(block, columns, byId, at) })),
       room + (topRows > 0 ? 1 : 0),
     )
@@ -392,6 +392,20 @@ const NODE_LOOK: Record<NodeState, { symbol: string; border: string; color: stri
   todo: { symbol: '○', border: 'dashed', color: 'subtle', dim: true, bold: false },
   failed: { symbol: '✗', border: 'round', color: 'error', dim: false, bold: false },
   wait: { symbol: '◆', border: 'round', color: 'warning', dim: false, bold: false },
+}
+
+/**
+ * Labels and notes cut only where the pane needs it: a box may be as wide as
+ * leaves room for two side by side, so a narrow pane cuts and a wide one does not.
+ */
+export function clipNodes(nodes: readonly GraphNode[], columns: number): GraphNode[] {
+  const inner = Math.max(8, Math.floor((columns - 2) / 2) - 7)
+  const clip = <N extends { label: string; note: string; back?: boolean }>(node: N): N => ({
+    ...node,
+    label: truncate(node.label, inner - 2),
+    note: truncate(node.note, inner - (node.back === true ? 2 : 0)),
+  })
+  return nodes.map(node => ({ ...clip(node), branches: node.branches.map(clip) }))
 }
 
 /** Columns a node box takes: its widest line, the padding and the border. */
@@ -535,7 +549,7 @@ function drawTime(Box: Draw, Text: Draw, rows: readonly { label: string; state: 
   const first = rows[0]!.start
   const last = Math.max(...rows.map(row => row.end))
   const tails = rows.map(row => `${ageText(row.end - row.start)}${row.state === 'now' ? '째' : ''}`)
-  const labelWidth = Math.min(10, Math.max(...rows.map(row => width(row.label))))
+  const labelWidth = Math.min(16, Math.max(...rows.map(row => width(row.label))))
   const tailWidth = Math.max(...tails.map(width))
   const area = Math.max(8, Math.min(48, columns - labelWidth - 2 - 1 - tailWidth))
   const scale = (ms: number) => (last === first ? 0 : Math.round(((ms - first) / (last - first)) * area))
@@ -561,7 +575,7 @@ function drawTime(Box: Draw, Text: Draw, rows: readonly { label: string; state: 
 // epoch  ██████░░░░░░ 2/10  36분 전
 function drawBars(Box: Draw, Text: Draw, items: readonly { label: string; value: number; max: number; tone: Tone; age: string }[], columns: number): Node {
   const labelWidth = Math.min(14, Math.max(...items.map(item => width(item.label))))
-  const tails = items.map(item => ` ${trimNumber(item.value)}/${trimNumber(item.max)}${item.age === '' ? '' : `  ${item.age}`}`)
+  const tails = items.map(item => ` ${valueText(item.value, item.max)}${item.age === '' ? '' : `  ${item.age}`}`)
   const tailWidth = Math.max(...tails.map(width))
   const barWidth = Math.max(6, Math.min(24, columns - labelWidth - 2 - tailWidth))
   return h(
@@ -579,6 +593,11 @@ function drawBars(Box: Draw, Text: Draw, items: readonly { label: string; value:
       )
     }),
   )
+}
+
+/** A bar's value beside its end: `2/10`, or the value alone for a ratio out of 1 (an AUC, a share). */
+export function valueText(value: number, max: number): string {
+  return max === 1 ? trimNumber(value) : `${trimNumber(value)}/${trimNumber(max)}`
 }
 
 function trimNumber(value: number): string {
@@ -799,13 +818,13 @@ function nodesOf(graph: Record<string, unknown>, from: (value: unknown) => numbe
   const nodes = list(graph.kind === 'flow' ? graph.steps : graph.nodes)
     .map(obj)
     .map(node => ({
-      label: str(node.label, 10),
+      label: str(node.label, 24),
       state: stateOf(node.state),
-      note: str(node.note, 12),
+      note: str(node.note, 32),
       from: from(node.from),
       branches: list(node.branches)
         .map(obj)
-        .map(branch => ({ label: str(branch.label, 10), state: stateOf(branch.state), note: str(branch.note, 12), back: branch.back === true }))
+        .map(branch => ({ label: str(branch.label, 24), state: stateOf(branch.state), note: str(branch.note, 32), back: branch.back === true }))
         .filter(branch => branch.label !== '')
         .slice(0, 2),
     }))

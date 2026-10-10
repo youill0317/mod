@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { fitBlocks, fitGraph, fitOf, graphRows, inOrder, parseSummary, promptFor, spans, stableKey } from '../hooks/register'
+import { clipNodes, fitBlocks, fitGraph, fitOf, graphRows, inOrder, parseSummary, promptFor, spans, stableKey, valueText } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
@@ -269,6 +269,20 @@ describe('helpers', () => {
     expect(fitGraph(nodes, 120, 4).every(one => one.branches.length === 0)).toBe(true)
     // Two boxes across and nine rows: the oldest finished stages fold into one box.
     expect(fitGraph(nodes, 34, 9).map(one => `${one.label} ${one.note}`)).toEqual(['… 2단계', '검사 12쪽', '최적화 12쪽', '배포 12쪽'])
+  })
+
+  test('names are cut only where the pane needs it', () => {
+    const nodes = [{ label: '이미지 오류', state: 'failed' as const, note: 'Astro 프로젝트 생성', from: 0, branches: [{ label: '깨진 링크 검사', state: 'failed' as const, note: '2개', back: true }] }]
+    // Wide: whole.
+    expect(clipNodes(nodes, 100)).toEqual(nodes)
+    // Two boxes across 40 columns: cut to fit.
+    const narrow = clipNodes(nodes, 40)[0]!
+    expect([narrow.label, narrow.note, narrow.branches[0]!.label]).toEqual(['이미지 오…', 'Astro 프로…', '깨진 링크…'])
+  })
+
+  test('a ratio out of 1 shows its value alone', () => {
+    expect(valueText(2, 10)).toBe('2/10')
+    expect(valueText(0.871, 1)).toBe('0.871')
   })
 
   test('the size class changes with the boxes across or a band of rows', () => {
