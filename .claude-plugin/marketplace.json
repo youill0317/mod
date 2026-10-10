@@ -9,6 +9,11 @@
       "name": "shell-memo",
       "source": "./shell-memo",
       "description": "Shows a short plain-Korean memo of the running foreground shell command beside Claude Code's working spinner."
+    },
+    {
+      "name": "dashboard",
+      "source": "./dashboard",
+      "description": "A live dashboard pane beside Claude Code that Claude designs from the work at hand: /dashboard."
     }
   ]
 }

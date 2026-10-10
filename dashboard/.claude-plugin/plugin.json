@@ -1,0 +1,7 @@
+{
+  "name": "dashboard",
+  "version": "0.1.0",
+  "description": "A live dashboard pane beside Claude Code that Claude designs from the work at hand: /dashboard.",
+  "author": { "name": "youill0317" },
+  "types": "./types/index.d.ts"
+}
