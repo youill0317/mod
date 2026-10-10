@@ -70,7 +70,12 @@ export type Summary = {
   /** The last log id this summary covers. */
   covers: number
   at: number
+  /** The pane size class it was laid out for (fitOf); another one lays it out again. */
+  fit: string
 }
+
+/** The pane's body as last drawn: cells across, rows down. */
+export type PaneSize = { columns: number; rows: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -81,6 +86,7 @@ declare module 'claude-code' {
       summary: Summary | null
       phase: string
       now: number
+      pane: PaneSize | null
     }
   }
 }

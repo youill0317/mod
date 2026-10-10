@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { inOrder, parseSummary, promptFor, repeatsValue, stableKey } from '../hooks/register'
+import { fitOf, inOrder, parseSummary, promptFor, repeatsValue, roomFor, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
@@ -169,6 +169,38 @@ describe('the progress dashboard', () => {
     await after.unmount()
   })
 
+  test('the model is told the pane size, and lays out again for another size class', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('tool.call', { tool: 'Bash' }, () => DONE)
+
+    const wide = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await clock.advance(0)
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
+    await clock.advance(2_000)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain('창: 가로 70칸, 세로 60줄. graph는 상자 8개까지(한 줄에 4개씩)')
+    await wide.unmount()
+
+    // A few cells narrower stays in the same class: the summary stands.
+    const near = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 66, scroll: { offset: 0, bodyRows: 56 } } })
+    await clock.advance(2_000)
+    expect(asked).toHaveLength(1)
+    await near.unmount()
+
+    // A narrow, short pane is another class: the same log is laid out again for it.
+    const narrow = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 34, scroll: { offset: 0, bodyRows: 14 } } })
+    await clock.advance(2_000)
+    expect(asked).toHaveLength(2)
+    expect(asked[1]).toContain('창: 가로 34칸, 세로 14줄. graph는 상자 4개까지(한 줄에 2개씩), 갈래는 넣지 않는다')
+    expect(asked[1]).toContain('창 크기가 지난번과 다르다')
+    await narrow.unmount()
+  })
+
   test('the signal never asks the person for permission', async $ => {
     const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
     expect(verdict.decision).toBe('allow')
@@ -182,7 +214,7 @@ describe('helpers', () => {
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'graph', title: '', nodes: [{ label: '확인', state: 'done', note: '', branches: [] }] }], covers: 1, at: 0 },
+      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'graph', title: '', nodes: [{ label: '확인', state: 'done', note: '', branches: [] }] }], covers: 1, at: 0, fit: '4L' },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',
@@ -192,6 +224,17 @@ describe('helpers', () => {
     expect(prompt).toContain('#2 1분 전 (새) 학습 재개')
     expect(prompt).toContain('셸 학습 (2분째)')
     expect(prompt).toContain('지난번에 쓴 대시보드')
+  })
+
+  test('the room left for the blocks takes off the lines above and below them', () => {
+    const run = { id: 'x', kind: 'agent' as const, label: '조사', startedAt: 0, background: false, taskId: null, last: 'Grep' }
+    // 32 rows for the blocks: two rows of six boxes (9), two branches (12), 10 left and 1 between.
+    expect(roomFor({ columns: 100, rows: 40 }, [run], [])).toBe('창: 가로 100칸, 세로 40줄. graph는 상자 8개까지(한 줄에 6개씩), 갈래는 모두 합쳐 2개까지. graph 말고 다른 블록은 모두 합쳐 10줄 안에 넣는다.')
+    // A narrow, short pane: four boxes in two rows and no room for anything else.
+    expect(roomFor({ columns: 40, rows: 14 }, [], [])).toBe('창: 가로 40칸, 세로 14줄. graph는 상자 4개까지(한 줄에 2개씩), 갈래는 넣지 않는다. graph 말고 다른 블록은 넣지 않는다.')
+    expect(fitOf({ columns: 100, rows: 40 })).toBe(fitOf({ columns: 98, rows: 41 }))
+    expect(fitOf({ columns: 100, rows: 40 })).not.toBe(fitOf({ columns: 100, rows: 20 }))
+    expect(fitOf(null)).toBe('')
   })
 
   test('the answer is read even around a code fence, and unknown log ids are dropped', () => {

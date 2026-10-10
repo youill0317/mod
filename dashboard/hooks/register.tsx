@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { GraphNode, LogEntry, NodeState, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
+import type { GraphNode, LogEntry, NodeState, PaneSize, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -13,6 +13,7 @@ const waiting = atom({ plugin: 'dashboard', key: 'waiting' } as const, [])
 const summary = atom({ plugin: 'dashboard', key: 'summary' } as const, null)
 const phase = atom({ plugin: 'dashboard', key: 'phase' } as const, '')
 const now = atom({ plugin: 'dashboard', key: 'now' } as const, 0)
+const pane = atom({ plugin: 'dashboard', key: 'pane' } as const, null)
 
 // The symbols that lead what waits on the person and what runs.
 const WAITING = '◆'
@@ -26,6 +27,7 @@ const LOG_FOR_MODEL = 80
 const SOON_MS = 2_000
 const LATER_MS = 20_000
 const TICK_MS = 10_000
+const OPEN_MS = 300
 
 // Log kinds that wake the model soon: the work changed phase or waits on the person.
 const URGENT: ReadonlySet<LogEntry['kind']> = new Set(['signal', 'answer', 'permission', 'question', 'agent-done', 'agent-failed', 'shell-failed', 'background-done'])
@@ -45,7 +47,7 @@ const SYSTEM = [
   '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일, 30자 이내", "waiting": "Claude가 답을 마치고 사용자의 결정을 기다리면 25자 이내. 사용자를 기다리는 것 목록에 이미 있으면 빈 문자열", "blocks": [블록...]}',
   '블록 종류:',
   '- {"kind": "graph", "title": "", "nodes": [{"label": "단계", "state": "done|now|todo|failed|wait", "note": "", "branches": [{"label": "", "state": "...", "note": "", "back": false}]}]}',
-  '  작업의 주된 흐름을 상자와 화살표로 그린다. nodes는 일어난 순서대로 4~6개, 지난 단계와 지금 단계와 다음 단계. now 뒤에는 todo만 둔다. 항상 첫 블록으로 둔다.',
+  '  작업의 주된 흐름을 상자와 화살표로 그린다. nodes는 일어난 순서대로 3~8개, 지난 단계와 지금 단계와 다음 단계. now 뒤에는 todo만 둔다. 항상 첫 블록으로 둔다.',
   '  branches는 그 단계에서 갈라진 일이다: 실패(failed), 사용자 대기(wait), 따로 돈 서브 에이전트나 작업(done/now). 실패를 고치고 다시 해서 넘어갔으면 back을 true로. 단계마다 최대 2개.',
   '  label은 한 단어 명사, 한글 4자 이내(예: 준비, 변환, 빌드, 배포, 학습). note는 그 단계의 핵심 수치나 대상, 8자 이내(예: 12쪽, 38/64, epoch 2), 없으면 빈 문자열.',
   '- {"kind": "table", "title": "", "columns": ["열"], "rows": [{"cells": ["값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 파일)을 비교할 때만. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
@@ -54,6 +56,8 @@ const SYSTEM = [
   '- {"kind": "list", "title": "", "items": [{"text": "20자 이내", "tone": "..."}]}  도식으로 나타낼 수 없는 것만, 최대 2줄. 거의 쓰지 않는다.',
   '블록 제목은 기본으로 빈 문자열이다. 블록만 보고 무엇인지 알 수 없을 때만 한 단어 명사로 붙인다(예: 세션, 실험, 점수).',
   '열 이름, 막대 이름, 숫자 이름도 한 단어 명사로 쓴다. "막힌 것", "확인할 것", "~한 ~"처럼 서술어가 붙은 말은 절대 쓰지 않는다. 보면 아는 말("지금", "현황")은 쓰지 않는다.',
+  '창 크기와 그 창에 맞는 한도가 주어지면 넘기지 않는다. 상자가 모자라면 지난 단계들을 한 상자로 묶고(예: 준비, 변환, 빌드 → 빌드), 지금 단계와 다음 단계는 남긴다. 넓은 창이면 단계를 나눠 더 펼친다.',
+  '다른 블록이 차지하는 줄: table은 행 수+2줄, bars는 항목마다 1줄, metrics는 4줄, 블록 사이 1줄. 줄이 모자라면 덜 중요한 블록부터 빼고 표의 행과 막대 항목을 줄인다. 남으면 억지로 채우지 않는다.',
   '블록은 최대 4개. 내용 없는 블록은 만들지 않는다. 지난번 대시보드가 있으면 작업이 크게 바뀌지 않는 한 블록 종류와 순서를 유지한다.',
   'from은 그 값을 확인한 기록의 번호다. 바깥 상태(학습 epoch, 세션 상태 등)에는 꼭 넣고, 아니면 0으로 둔다.',
   'tone은 normal, good(끝남), warn(주의), bad(실패), muted(덜 중요) 중 하나.',
@@ -66,6 +70,8 @@ let timer: { cancel: () => void } | undefined
 let timerAt = Number.POSITIVE_INFINITY
 let busy = false
 let again = false
+// The pane size the render hook last reported, so a redraw at the same size reports nothing.
+let seen = ''
 // Calls in flight on the main loop, to tell which one a permission dialog is for.
 const pending = new Map<string, { tool: string; key: string }>()
 
@@ -112,7 +118,8 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: '작업 과정' })
     const at = await $.clock.now()
     await update($, now, () => at)
-    $.clock.after(0, () => wake($, ask === 'refresh'))
+    // A moment for the pane's first draw to note its size, so the summary is laid out for it.
+    $.clock.after(OPEN_MS, () => wake($, ask === 'refresh'))
     return { text: ask === 'refresh' ? '대시보드를 다시 정리합니다.' : '작업 과정 대시보드를 열었습니다.' }
   })
 
@@ -234,6 +241,12 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const columns = Math.max(24, e.props.bodyColumns)
+    // A render never writes state: the size is noted just after, for the next summary.
+    const rows = e.props.scroll.bodyRows
+    if (`${columns}x${rows}` !== seen) {
+      seen = `${columns}x${rows}`
+      $.clock.after(0, () => noteSize($, { columns, rows }))
+    }
     const entries = await read($, log)
     const runs = await read($, running)
     const waits = await read($, waiting)
@@ -541,6 +554,13 @@ async function wake($: EngineInterface, force: boolean) {
   await summarize($)
 }
 
+async function noteSize($: EngineInterface, size: PaneSize) {
+  await update($, pane, () => size)
+  // A summary laid out for another size class is laid out again for this one.
+  const written = await read($, summary)
+  if (written !== null && written.fit !== fitOf(size)) await schedule($, SOON_MS)
+}
+
 async function paneShown($: EngineInterface): Promise<boolean> {
   try {
     return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
@@ -568,15 +588,17 @@ async function summarize($: EngineInterface) {
     const entries = await read($, log)
     const previous = await read($, summary)
     const newest = entries[entries.length - 1]?.id ?? 0
-    if (newest === 0 || (previous !== null && previous.covers >= newest)) return
+    const size = await read($, pane)
+    const fit = fitOf(size)
+    if (newest === 0 || (previous !== null && previous.covers >= newest && previous.fit === fit)) return
 
-    const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), await $.clock.now())
+    const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), await $.clock.now(), size)
     const text = await complete($, prompt)
     if (text === undefined) return
     const written = parseSummary(text, new Set(entries.map(entry => entry.id)))
     if (written === undefined) return
     const at = await $.clock.now()
-    await update($, summary, () => ({ ...written, covers: newest, at }))
+    await update($, summary, () => ({ ...written, covers: newest, at, fit }))
   } finally {
     busy = false
     if (again) {
@@ -636,10 +658,13 @@ export function promptFor(
   waits: readonly WaitingItem[],
   said: string,
   at: number,
+  size: PaneSize | null = null,
 ): string {
   const covered = previous?.covers ?? 0
   const lines = entries.map(entry => `#${entry.id} ${ageText(at - entry.at)} 전${entry.id > covered ? ' (새)' : ''} ${entry.text}`)
   return [
+    size === null ? '' : roomFor(size, runs, waits),
+    size !== null && previous !== null && previous.fit !== fitOf(size) ? '창 크기가 지난번과 다르다: 새 크기에 맞게 다시 짠다.' : '',
     said === '' ? '' : `Claude가 알린 지금 단계: ${said}`,
     `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${item.label} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
     `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => item.label).join('; ')}`,
@@ -651,8 +676,60 @@ export function promptFor(
     .join('\n')
 }
 
+// A node box with a label of a few letters and its arrow: what one column of the graph takes.
+const NODE_COLUMNS = 15
+
+/** How many node boxes fit across the pane, about. */
+export function nodesAcross(columns: number): number {
+  return Math.max(1, Math.floor((columns - 2) / NODE_COLUMNS))
+}
+
+/**
+ * What fits in a pane with `rows` for the blocks: the graph's boxes (a row of
+ * them, two when one row holds fewer than three or the pane is tall), its
+ * branches, and the rows left for the other blocks.
+ */
+export function layoutFor(columns: number, rows: number): { across: number; nodes: number; branches: number; rest: number } {
+  const across = nodesAcross(columns)
+  const lines = across < 3 || rows >= 30 ? 2 : 1
+  const nodes = Math.min(8, across * lines)
+  // A row of boxes takes 4 rows and 1 between; a branch under a box takes 6.
+  let left = rows - (4 * lines + (lines - 1))
+  const branches = left >= 12 ? 2 : left >= 6 ? 1 : 0
+  left -= 6 * branches
+  // The row between the graph and the next block.
+  return { across, nodes, branches, rest: Math.max(0, left - 1) }
+}
+
+/**
+ * The size class a summary is laid out for: what fits in the pane, with the rows
+ * left for other blocks in bands. A resize within it keeps the summary.
+ */
+export function fitOf(size: PaneSize | null): string {
+  if (size === null) return ''
+  const room = layoutFor(size.columns, size.rows - 5)
+  // Past two dozen rows, more room changes nothing the model would choose.
+  const band = [2, 6, 12, 24].filter(edge => room.rest >= edge).length
+  return `${room.nodes}/${room.branches}/${band}`
+}
+
+/** The pane's room told to the model, as limits it can keep without counting cells. */
+export function roomFor(size: PaneSize, runs: readonly RunningItem[], waits: readonly WaitingItem[]): string {
+  // Around the blocks: the title, the current line, the row above the first block,
+  // the footer and the row above it, and the live lines with the row above them.
+  const shown = runs.filter(item => !waits.some(wait => wait.id === item.id))
+  const live = waits.length + shown.length + shown.filter(item => item.last !== '').length
+  const rows = Math.max(4, size.rows - 5 - (live > 0 ? live + 1 : 0))
+  const room = layoutFor(size.columns, rows)
+  return [
+    `창: 가로 ${size.columns}칸, 세로 ${size.rows}줄.`,
+    `graph는 상자 ${room.nodes}개까지(한 줄에 ${room.across}개씩), 갈래는 ${room.branches === 0 ? '넣지 않는다' : `모두 합쳐 ${room.branches}개까지`}.`,
+    room.rest < 2 ? 'graph 말고 다른 블록은 넣지 않는다.' : `graph 말고 다른 블록은 모두 합쳐 ${room.rest}줄 안에 넣는다.`,
+  ].join(' ')
+}
+
 /** The model's JSON as a summary, or undefined when it is not one. */
-export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summary, 'covers' | 'at'> | undefined {
+export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summary, 'covers' | 'at' | 'fit'> | undefined {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start === -1 || end <= start) return undefined
@@ -690,7 +767,7 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
             .slice(0, 2),
         }))
         .filter(node => node.label !== '')
-        .slice(0, 7)
+        .slice(0, 8)
       return nodes.length === 0 ? undefined : { kind: 'graph', title, nodes: inOrder(nodes) }
     }
     case 'table': {
