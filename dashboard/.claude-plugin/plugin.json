@@ -1,7 +1,16 @@
 {
   "name": "dashboard",
-  "version": "0.1.0",
-  "description": "A live dashboard pane beside Claude Code that Claude designs from the work at hand: /dashboard.",
+  "version": "0.2.0",
+  "description": "A pane that shows how the work is going (what runs, what waits on you, what happened while you were away), written by a small model on each change: /dashboard.",
   "author": { "name": "youill0317" },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "model": {
+      "type": "string",
+      "title": "Dashboard model",
+      "description": "Model woken on each change to rewrite the dashboard.",
+      "default": "haiku",
+      "options": ["haiku", "sonnet"]
+    }
+  }
 }

@@ -1,131 +1,174 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { pickValue, progressOf, sparkline, statusLook, tableRows, toDashboard } from '../hooks/register'
+import { parseSummary, promptFor, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
   component: 'Pane',
   requestId: 'dashboard',
-  props: { title: 'Colab', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  props: { title: '작업 과정', isFocused: false, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
 } as const
 
-const COLAB = {
-  title: 'Colab 학습',
-  refreshSeconds: 10,
-  sources: { metrics: { file: 'runs/l4a/metrics.json' } },
-  sections: [
-    {
-      title: 'l4a · L4',
-      items: [
-        { kind: 'status', label: '세션', from: { source: 'metrics', path: 'state' } },
-        { kind: 'progress', label: 'epoch', from: { source: 'metrics', path: 'epoch' }, total: 10 },
-        { kind: 'sparkline', label: 'loss', from: { source: 'metrics', path: 'loss' } },
-        { kind: 'stat', label: 'GPU', value: 'L4', tone: 'accent' },
-      ],
-    },
-  ],
-}
+const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+const DONE = { result: { stdout: 'epoch 3/10 loss=0.51', stderr: '', interrupted: false } }
 
-describe('the dashboard Claude designs', () => {
-  test('reads its sources and draws them in the pane on every surface', async ($, on) => {
-    mock.clock(on, { now: 1_000_000 })
-    on('ui.open', () => ({ value: { isPlaced: true } }))
-    on('fs.read', () => ({ value: '{"state":"training","epoch":3,"loss":[0.9,0.7,0.6,0.5]}' }))
+const WRITTEN = JSON.stringify({
+  title: 'Colab 학습 재개',
+  now: 'l4a에서 epoch 2 체크포인트로 학습 재개 중',
+  steps: [{ from: 1, text: 'Drive에서 체크포인트 확인' }],
+  checks: [{ label: 'l4a epoch', value: '3/10', from: 2 }],
+  blocked: [],
+  next: 'epoch 3 결과 확인',
+  waiting: '',
+})
 
-    const shown = await $.tool.call({ tool: 'mcp__dashboard__show', ...COLAB })
-    expect(String(shown.result)).toContain('Colab 학습')
+describe('the progress dashboard', () => {
+  test('a running shell shows under what runs, then joins the steps', async ($, on) => {
+    const clock = mock.clock(on)
+    let finish: () => void = () => undefined
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (finish = () => resolve(DONE))))
 
+    const call = $.tool.call({ tool: 'Bash', command: 'python3 train.py', description: '학습 재개' })
+    await clock.advance(0)
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await ui.find({ type: 'Text', text: /l4a · L4/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /training/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /3\/10 30%/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /▇|█/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /● 셸 {2}학습 재개/ })).toBeDefined()
       await ui.unmount()
     }
-  })
 
-  test('runs no command the person did not allow', async ($, on) => {
-    mock.clock(on, { now: 1_000_000 })
-    on('ui.open', () => ({ value: { isPlaced: true } }))
-    on('tool.call', { tool: 'AskUserQuestion' }, () => ({ deny: 'dismissed' }))
-    let runs = 0
-    on('process.run', () => {
-      runs++
-      return { value: { exitCode: 0, stdout: 'ok', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-    })
-
-    const shown = await $.tool.call({
-      tool: 'mcp__dashboard__show',
-      title: 'GPU',
-      sources: { gpu: { command: ['nvidia-smi'] } },
-      sections: [{ items: [{ kind: 'stat', label: 'GPU', from: { source: 'gpu' } }] }],
-    })
-    expect(String(shown.result)).toContain('허용하지 않아')
-    expect(runs).toBe(0)
-
+    finish()
+    await call
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /허용되지 않음/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /● 셸/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /셸 끝남 .*학습 재개/ })).toBeDefined()
     await ui.unmount()
   })
 
-  test('/dashboard asks Claude to design one from the work at hand', async ($, on) => {
+  test('a phase signal wakes the model, and its words fill the fixed sections', async ($, on) => {
     const clock = mock.clock(on)
-    const sent: string[] = []
-    on('prompt.submit', ($, e) => {
-      sent.push(e.text)
-      return { text: e.text }
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      asked.push(e.prompt)
+      return { value: { isAnswered: true, text: '```json\n' + WRITTEN + '\n```', usage: USAGE } }
     })
-    const ran = await $.command.run({
-      command: 'dashboard',
-      args: 'Colab 세션별로',
-      origin: { kind: 'composer' },
-      presentation: { isFullscreen: true, columns: 160 },
-    })
-    expect(ran.text).toContain('설계')
-    await clock.advance(1)
-    expect(sent[0]).toContain('mcp__dashboard__show')
-    expect(sent[0]).toContain('Colab 세션별로')
+    on('tool.call', { tool: 'Bash' }, () => DONE)
+
+    await $.tool.call({ tool: 'Bash', command: 'rclone ls gdrive:ckpt', description: '체크포인트 확인' })
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
+    await clock.advance(2_000)
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain('Claude가 알린 지금 단계: 학습 재개')
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /Colab 학습 재개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /지금 {2}l4a에서 epoch 2/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Drive에서 체크포인트 확인/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /l4a epoch {2}3\/10/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /epoch 3 결과 확인/ })).toBeDefined()
+    await ui.unmount()
   })
 
-  test('the empty pane says how to make one', async $ => {
+  test('a question to the person shows under what waits on them', async ($, on) => {
+    const clock = mock.clock(on)
+    let answer: () => void = () => undefined
+    on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(resolve => (answer = () => resolve({ result: { answers: {} } }))))
+
+    const call = $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: '어느 체크포인트로 이어갈까요?', header: 'Resume', options: [], multiSelect: false }] } as never)
+    await clock.advance(0)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /\/dashboard/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}질문: 어느 체크포인트로/ })).toBeDefined()
     await ui.unmount()
+
+    answer()
+    await call
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^ {2}질문: 어느 체크포인트로/ })).toBeUndefined()
+    await after.unmount()
+  })
+
+  test('a permission dialog waits on the person until they act', async ($, on) => {
+    const clock = mock.clock(on)
+    let finish: () => void = () => undefined
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (finish = () => resolve(DONE))))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('classic.PermissionRequest', () => ({}))
+
+    const call = $.tool.call({ tool: 'Bash', command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기' })
+    await clock.advance(0)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기' } })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^ {2}권한 요청: 셸: Kaggle 데이터셋 만들기/ })).toBeDefined()
+    await ui.unmount()
+
+    await $.prompt.submit({ text: '허용했어', origin: { kind: 'composer' }, wait: false } as never)
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^ {2}권한 요청/ })).toBeUndefined()
+    await after.unmount()
+    finish()
+    await call
+  })
+
+  test('a subagent runs on its own row and leaves a step when it ends', async ($, on) => {
+    on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+    on('turn.complete', () => ({ text: '' }))
+
+    await $.agent.spawn({
+      tool_use_id: 't1',
+      prompt: 'run_gpu에 두 번째 GPU 패스 추가',
+      description: 'GPU 패스 추가',
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'opus',
+      background: true,
+      fork: false,
+    } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /● 서브 에이전트 {2}general-purpose: GPU 패스 추가/ })).toBeDefined()
+    await ui.unmount()
+
+    await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' } as never)
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /● 서브 에이전트/ })).toBeUndefined()
+    expect(await after.find({ type: 'Text', text: /서브 에이전트 끝남: general-purpose: GPU 패스 추가/ })).toBeDefined()
+    await after.unmount()
+  })
+
+  test('the signal never asks the person for permission', async $ => {
+    const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
+    expect(verdict.decision).toBe('allow')
   })
 })
 
 describe('helpers', () => {
-  test('a pick reads JSON paths and regular expressions', () => {
-    const readings = { m: { runs: [{ loss: 0.42 }] }, log: 'epoch 3/10 loss=0.51' }
-    expect(pickValue(readings, { source: 'm', path: 'runs[0].loss' })).toBe(0.42)
-    expect(pickValue(readings, { source: 'log', regex: 'loss=([\\d.]+)' })).toBe('0.51')
-    expect(pickValue(readings, { source: 'missing' })).toBeUndefined()
+  test('the model gets the log, what runs, what waits and what it wrote before', () => {
+    const prompt = promptFor(
+      [
+        { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
+        { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
+      ],
+      { title: 't', now: 'n', steps: [], checks: [], blocked: [], next: '', waiting: '', covers: 1, at: 0 },
+      [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
+      [],
+      '학습 재개',
+      120_000,
+    )
+    expect(prompt).toContain('#1 2분 전 셸 끝남')
+    expect(prompt).toContain('#2 1분 전 (새) 학습 재개')
+    expect(prompt).toContain('셸 학습 (2분째)')
+    expect(prompt).toContain('지난번에 쓴 대시보드')
   })
 
-  test('progress takes a number, "a/b" or an object', () => {
-    expect(progressOf({ kind: 'progress', label: 'e', from: { source: 'log', regex: '(\\d+/\\d+)' } }, { log: 'epoch 3/10' })).toEqual([3, 10])
-    expect(progressOf({ kind: 'progress', label: 'e', from: { source: 'm' } }, { m: { current: 2, total: 5 } })).toEqual([2, 5])
-    expect(progressOf({ kind: 'progress', label: 'e', current: 1, total: 4 }, {})).toEqual([1, 4])
+  test('the answer is read even around a code fence, and unknown log ids are dropped', () => {
+    const written = parseSummary('여기 있습니다\n```json\n' + WRITTEN + '\n```', new Set([1]))
+    expect(written?.now).toContain('학습 재개')
+    expect(written?.steps[0]).toEqual({ from: 1, text: 'Drive에서 체크포인트 확인' })
+    expect(written?.checks[0]?.from).toBe(0)
+    expect(parseSummary('모르겠습니다', new Set())).toBeUndefined()
   })
 
-  test('tables take rows, objects keyed by column, or text lines', () => {
-    expect(tableRows({ kind: 'table', columns: ['a', 'b'], from: { source: 't' } }, { t: [{ a: 1, b: 'x' }] })).toEqual([['1', 'x']])
-    expect(tableRows({ kind: 'table', columns: ['a', 'b'], from: { source: 't' } }, { t: 'l4a  running\nl4b  done' })).toEqual([
-      ['l4a', 'running'],
-      ['l4b', 'done'],
-    ])
-  })
-
-  test('sparklines and status looks', () => {
-    expect(sparkline([0, 1])).toBe('▁█')
-    expect(statusLook('training').glyph).toBe('●')
-    expect(statusLook('종료됨').glyph).toBe('✗')
-    expect(statusLook('done').glyph).toBe('✓')
-  })
-
-  test('a design without sections is refused', () => {
-    expect(toDashboard({ title: 'x', sections: [] })).toBe('sections가 하나 이상 필요함')
-    expect(typeof toDashboard(COLAB)).toBe('object')
+  test('two spellings of one input compare equal', () => {
+    expect(stableKey({ b: 1, a: [1, { d: 2, c: 3 }] })).toBe(stableKey({ a: [1, { c: 3, d: 2 }], b: 1 }))
   })
 })

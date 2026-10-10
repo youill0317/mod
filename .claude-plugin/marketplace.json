@@ -13,7 +13,7 @@
     {
       "name": "dashboard",
       "source": "./dashboard",
-      "description": "A live dashboard pane beside Claude Code that Claude designs from the work at hand: /dashboard."
+      "description": "A pane that shows how the work is going (what runs, what waits on you, what happened while you were away), written by a small model on each change: /dashboard."
     }
   ]
 }

@@ -1,683 +1,554 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { AgentRow, Dashboard, Item, Json, Pick, Source, Tone } from '../types'
+import type { LogEntry, RunningItem, Summary, WaitingItem } from '../types'
 
 const PANE = 'dashboard'
-const TOOL = 'show'
-const TOOL_ID = 'mcp__dashboard__show'
+const SIGNAL = 'signal'
+const SIGNAL_ID = 'mcp__dashboard__signal'
 
-const spec = atom({ plugin: 'dashboard', key: 'spec' } as const, null)
-const approved = atom({ plugin: 'dashboard', key: 'approved' } as const, false)
-const values = atom({ plugin: 'dashboard', key: 'values' } as const, {})
-const errors = atom({ plugin: 'dashboard', key: 'errors' } as const, {})
-const history = atom({ plugin: 'dashboard', key: 'history' } as const, {})
-const updatedAt = atom({ plugin: 'dashboard', key: 'updatedAt' } as const, null)
+const log = atom({ plugin: 'dashboard', key: 'log' } as const, [])
+const running = atom({ plugin: 'dashboard', key: 'running' } as const, [])
+const waiting = atom({ plugin: 'dashboard', key: 'waiting' } as const, [])
+const summary = atom({ plugin: 'dashboard', key: 'summary' } as const, null)
+const phase = atom({ plugin: 'dashboard', key: 'phase' } as const, '')
+const lastSeen = atom({ plugin: 'dashboard', key: 'lastSeen' } as const, 0)
 const now = atom({ plugin: 'dashboard', key: 'now' } as const, 0)
-const agents = atom({ plugin: 'dashboard', key: 'agents' } as const, [])
 
-const TICK_MS = 5_000
-const MIN_REFRESH_SECONDS = 5
-const DEFAULT_REFRESH_SECONDS = 15
-const MAX_SOURCE_CHARS = 20_000
-const MAX_HISTORY = 120
-const MAX_AGENTS = 20
-const MAX_TABLE_ROWS = 20
+const MAX_LOG = 300
+const LOG_FOR_MODEL = 80
+// The model is woken soon after a change that matters, later after routine ones.
+const SOON_MS = 2_000
+const LATER_MS = 20_000
+const TICK_MS = 10_000
 
-const SOURCE_SCHEMA = {
-  type: 'object',
-  description: 'Exactly one of command, file or url.',
-  properties: {
-    command: { type: 'array', items: { type: 'string' }, description: 'argv run without a shell; stdout is read. The person approves commands once.' },
-    file: { type: 'string', description: 'Text file path, relative to the working directory or absolute.' },
-    url: { type: 'string', description: 'URL fetched with GET.' },
-  },
-}
+// Log kinds that wake the model soon: the work changed phase or waits on the person.
+const URGENT: ReadonlySet<LogEntry['kind']> = new Set(['signal', 'answer', 'permission', 'question', 'agent-done', 'agent-failed', 'shell-failed', 'background-done'])
 
-const PICK_SCHEMA = {
-  type: 'object',
-  required: ['source'],
-  properties: {
-    source: { type: 'string', description: 'Id of an entry in sources.' },
-    path: { type: 'string', description: 'Path into the JSON value, e.g. runs.0.loss.' },
-    regex: { type: 'string', description: 'Regex over the text; group 1 or the whole match. For sparkline every match is a point.' },
-  },
-}
-
-const INPUT_SCHEMA = {
-  type: 'object',
-  required: ['title', 'sections'],
-  properties: {
-    title: { type: 'string' },
-    refreshSeconds: { type: 'number', description: `How often sources are read again; at least ${MIN_REFRESH_SECONDS}, default ${DEFAULT_REFRESH_SECONDS}.` },
-    sources: { type: 'object', additionalProperties: SOURCE_SCHEMA, description: 'Live values by id.' },
-    sections: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['items'],
-        properties: {
-          title: { type: 'string' },
-          items: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['kind'],
-              description:
-                'kind text {text|from, tone}; stat {label, value|from, unit, tone}; progress {label, current|from (number, "a/b" or {current,total}), total|totalFrom}; sparkline {label, values|from (number appended each refresh, or number list)}; status {label, state|from, detail}; table {columns, rows|from (rows, objects keyed by column, or text lines)}; agents {} (live subagents of this session). tone: normal good warn bad muted accent.',
-              properties: {
-                kind: { type: 'string', enum: ['text', 'stat', 'progress', 'sparkline', 'status', 'table', 'agents'] },
-                label: { type: 'string' },
-                text: { type: 'string' },
-                value: { type: ['string', 'number'] },
-                unit: { type: 'string' },
-                tone: { type: 'string', enum: ['normal', 'good', 'warn', 'bad', 'muted', 'accent'] },
-                current: { type: 'number' },
-                total: { type: 'number' },
-                values: { type: 'array', items: { type: 'number' } },
-                state: { type: 'string' },
-                detail: { type: 'string' },
-                columns: { type: 'array', items: { type: 'string' } },
-                rows: { type: 'array', items: { type: 'array', items: { type: ['string', 'number'] } } },
-                from: PICK_SCHEMA,
-                totalFrom: PICK_SCHEMA,
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-}
-
-const TOOL_DESCRIPTION = [
-  'Shows a live dashboard in a pane beside the conversation, replacing any dashboard shown before.',
-  'Design it for what the person is working on now: sections of items, kept short for a pane about 40 to 60 columns wide.',
-  'Values that change go in sources (a command, a file or a URL) read again every refreshSeconds, and items point at them with from.',
-  'Values you already know can be given directly. Call it again with a new design to change the dashboard.',
+const SIGNAL_DESCRIPTION = [
+  "Marks a change in the work's phase on the person's progress dashboard.",
+  'Call it when a new phase starts, a major phase ends, the work is blocked, or a decision from the person is needed.',
+  "One short line in the person's language. Do not call it for routine steps.",
 ].join(' ')
 
-const designPrompt = (ask: string) =>
-  [
-    '사용자가 /dashboard 를 실행했습니다. 지금까지의 작업 맥락을 바탕으로, 사용자가 지금 한눈에 보고 싶어 할 실시간 대시보드를 설계해서 띄워 주세요.',
-    ask === '' ? '' : `사용자의 요청: ${ask}`,
-    `${TOOL_ID} 도구를 쓰세요. 목록에 없으면 ToolSearch에서 "select:${TOOL_ID}"로 불러옵니다.`,
-    '계속 바뀌는 값은 sources에 읽는 방법(명령, 파일, URL)을 넣고 from으로 연결하세요. 이미 아는 값은 직접 넣어도 됩니다.',
-    '서브 에이전트를 쓰는 작업이면 agents 항목을 넣으세요. 창 폭은 40~60열 정도이니 간결하게 짜세요.',
-    '띄운 뒤에는 무엇을 보여 주는지 한두 문장으로만 알려 주세요.',
-  ]
-    .filter(line => line !== '')
-    .join('\n')
+const SYSTEM = [
+  '너는 Claude Code 작업의 진행 대시보드를 쓴다. 사용자가 자리를 비웠다 돌아와도 작업 맥락을 바로 파악하고, 자리에 있을 때도 전체 과정을 통제할 수 있게 돕는 것이 목적이다.',
+  '결과물, 계획, 파일 내용은 쓰지 않는다. 작업이 어떻게 흘러왔고 지금 어디에 있는지만 쓴다.',
+  'JSON 하나만 출력한다. 형식:',
+  '{"title": "작업 이름, 15자 이내",',
+  ' "now": "지금 하는 일 한 문장, 40자 이내",',
+  ' "steps": [{"from": 기록 번호, "text": "30자 이내"}],  최신순, 최대 8개. 사소한 기록은 묶고 의미 있는 단계 전환만 남긴다. from은 그 단계를 보여 주는 기록의 번호.',
+  ' "checks": [{"label": "...", "value": "...", "from": 기록 번호}],  기록의 출력에서 확인된 바깥 상태(학습 epoch, 손실값, 원격 세션 상태 등), 최대 4개, 없으면 [].',
+  ' "blocked": ["막힌 것, 실패, 재시도 중인 것"],  없으면 [].',
+  ' "next": "다음에 할 일로 보이는 것, 30자 이내, 모르면 빈 문자열",',
+  ' "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 30자 이내, 아니면 빈 문자열"}',
+  '쉬운 한국어로 쓴다. 명령어나 경로는 꼭 필요할 때만 짧게 쓴다.',
+].join('\n')
 
-export const register: Register = on => {
+// Module state: it starts over on a reload.
+let preferred = 'haiku'
+let fallback: string | undefined
+let timer: { cancel: () => void } | undefined
+let timerAt = Number.POSITIVE_INFINITY
+let busy = false
+let again = false
+// Calls in flight on the main loop, to tell which one a permission dialog is for.
+const pending = new Map<string, { tool: string; key: string }>()
+
+export const register: Register = (on, options) => {
+  preferred = typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku'
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'dashboard',
-      description: 'Claude가 지금 작업에 맞춘 실시간 대시보드를 옆에 띄웁니다',
-      argumentHint: '[요청 | refresh | close]',
+      description: '작업 과정 대시보드를 옆에 엽니다',
+      argumentHint: '[refresh | close]',
     })
-    await $.tool.register({ name: TOOL, description: TOOL_DESCRIPTION, inputSchema: INPUT_SCHEMA, isDeferred: true })
+    await $.tool.register({
+      name: SIGNAL,
+      description: SIGNAL_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        required: ['phase'],
+        properties: {
+          phase: { type: 'string', description: 'The phase now, one short line.' },
+          note: { type: 'string', description: 'Optional: what is blocked or what the person must decide.' },
+        },
+      },
+      isDeferred: false,
+    })
+    // A reload loses the calls the old module was holding: they are no longer tracked.
+    await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
+    await update($, waiting, () => [])
     $.clock.every(TICK_MS, () => tick($))
     return next(e)
   })
 
   on('command.run', { command: 'dashboard' }, async ($, e) => {
     const ask = e.args.trim()
-    const current = await read($, spec)
-
     if (ask === 'close') {
       await $.ui.close({ id: PANE })
       return { text: '대시보드를 닫았습니다.' }
     }
-    if (ask === 'refresh') {
-      if (current === null) return { text: '아직 대시보드가 없습니다. /dashboard 로 만들어 주세요.' }
-      await refresh($, current)
-      return { text: '대시보드를 새로 읽었습니다.' }
-    }
-    if (ask === '' && current !== null) {
-      await $.ui.open({ id: PANE, title: current.title })
-      return { text: `대시보드를 열었습니다: ${current.title}` }
-    }
-
-    // A command cannot start a turn while it runs: the prompt goes right after it.
-    const text = designPrompt(ask)
-    $.clock.after(0, () => submitDesign($, text))
-    return { text: '지금 작업에 맞는 대시보드를 Claude가 설계합니다.' }
+    await $.ui.open({ id: PANE, title: '작업 과정' })
+    await update($, now, () => Date.now())
+    $.clock.after(0, () => wake($, ask === 'refresh'))
+    return { text: ask === 'refresh' ? '대시보드를 다시 정리합니다.' : '작업 과정 대시보드를 열었습니다.' }
   })
 
-  on('tool.call', { tool: TOOL_ID }, async ($, e) => {
-    const design = toDashboard(e)
-    if (typeof design === 'string') return { result: `대시보드를 띄우지 못했습니다: ${design}` }
+  // The signal is the dashboard's own bookkeeping: it never needs the person's yes.
+  on('tool.check', { tool: SIGNAL_ID }, () => ({ decision: 'allow' }))
 
-    const commands = Object.values(design.sources ?? {}).filter(source => source.command !== undefined)
-    const allowed = commands.length === 0 ? true : await askToRun($, design)
-
-    await update($, spec, () => design)
-    await update($, approved, () => allowed)
-    await update($, values, () => ({}))
-    await update($, errors, () => ({}))
-    await update($, history, () => ({}))
-    await refresh($, design)
-
-    const opened = await $.ui.open({ id: PANE, title: design.title })
-    const failed = Object.keys(await read($, errors))
-
-    return {
-      result: [
-        `대시보드 "${design.title}"를 띄웠습니다.`,
-        opened.isPlaced ? '' : '터미널 폭이 좁아 아직 화면에 배치되지 않았습니다. 사용자가 /dashboard 로 열 수 있습니다.',
-        commands.length === 0 ? '' : allowed ? '명령 실행이 허용됐습니다.' : '사용자가 명령 실행을 허용하지 않아 명령으로 읽는 값은 비어 있습니다.',
-        failed.length === 0 ? '' : `읽지 못한 소스: ${failed.join(', ')}`,
-      ]
-        .filter(line => line !== '')
-        .join('\n'),
-    }
-  })
-
-  on('agent.spawn', async ($, e, next) => {
-    const started = await next(e)
-    const id = started.agentId
-    if (id !== undefined) {
-      const row: AgentRow = {
-        id,
-        type: e.subagentType,
-        description: e.description,
-        startedAt: (await $.clock.now()),
-        endedAt: null,
-        tools: 0,
-        last: '',
-        status: 'running',
-      }
-      await update($, agents, list => [...list.filter(one => one.id !== id), row].slice(-MAX_AGENTS))
-    }
-    return started
+  on('tool.call', { tool: SIGNAL_ID }, async ($, e) => {
+    const input = e as unknown as { phase?: unknown; note?: unknown }
+    const said = typeof input.phase === 'string' ? input.phase.trim() : ''
+    const note = typeof input.note === 'string' ? input.note.trim() : ''
+    if (said !== '') await update($, phase, () => said)
+    await record($, 'signal', note === '' ? said : `${said} (${note})`)
+    return { result: '대시보드에 기록했습니다.' }
   })
 
   on('tool.call', async ($, e, next) => {
-    const id = e.agentId
-    if (id !== undefined) {
-      const last = activityOf(e)
-      await update($, agents, list => list.map(one => (one.id === id ? { ...one, tools: one.tools + 1, last } : one)))
+    if (e.tool.startsWith('mcp__dashboard__')) return next(e)
+
+    const input = inputOf(e)
+    const id = e.tool_use_id
+
+    // A subagent's call: only its latest step is kept, on its row.
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      const step = stepOf(e.tool, input)
+      await update($, running, list => list.map(item => (item.id === agentId ? { ...item, last: step } : item)))
+      return next(e)
+    }
+
+    pending.set(id, { tool: e.tool, key: stableKey(input) })
+    try {
+      if (e.tool === 'Bash') {
+        const startedAt = await startShell($, id, input)
+        const ran = await next(e)
+        await endShell($, id, input, ran, startedAt)
+        return ran
+      }
+
+      if (e.tool === 'AskUserQuestion') {
+        const label = questionOf(input)
+        const item: WaitingItem = { id, kind: 'question', label, since: Date.now() }
+        await update($, waiting, list => [...list, item])
+        await record($, 'question', `사용자에게 질문: ${label}`)
+        return await next(e)
+      }
+
+      const ran = await next(e)
+      const done = ran.deny === undefined && ran.isError !== true
+      if (done && ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(e.tool)) await record($, 'edit', `파일 수정: ${baseName(input.file_path ?? input.notebook_path)}`)
+      else if (done && (e.tool === 'WebSearch' || e.tool === 'WebFetch' || e.tool.startsWith('mcp__'))) await record($, 'tool', stepOf(e.tool, input))
+      return ran
+    } finally {
+      pending.delete(id)
+      await update($, waiting, list => list.filter(item => item.id !== id))
+    }
+  })
+
+  // The dialog asks about one of the calls in flight: it now waits on the person.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const key = stableKey(e.tool_input)
+    const same = [...pending.entries()].filter(([, call]) => call.tool === e.tool_name)
+    const match = same.find(([, call]) => call.key === key) ?? (same.length === 1 ? same[0] : undefined)
+    if (match !== undefined) {
+      const [id] = match
+      const label = stepOf(e.tool_name, (e.tool_input ?? {}) as Record<string, unknown>)
+      const item: WaitingItem = { id, kind: 'permission', label, since: Date.now() }
+      await update($, waiting, list => [...list.filter(one => one.id !== id), item])
+      await record($, 'permission', `권한 요청: ${label}`)
     }
     return next(e)
   })
 
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    const agentId = started.agentId
+    if (agentId !== undefined && e.workflow === undefined) {
+      const row: RunningItem = { id: agentId, kind: 'agent', label: `${e.subagentType}: ${e.description}`, startedAt: Date.now(), background: e.background, taskId: null, last: '' }
+      await update($, running, list => [...list.filter(item => item.id !== agentId), row])
+      await record($, 'agent', `서브 에이전트 시작 (${e.subagentType}): ${e.description}`)
+    }
+    return started
+  })
+
   on('turn.complete', async ($, e, next) => {
     const ended = await next(e)
-    const id = e.agentId
-    if (id !== undefined) {
-      const status = e.reason === 'answer' ? 'done' : 'failed'
-      const at = (await $.clock.now())
-      await update($, agents, list => list.map(one => (one.id === id ? { ...one, status, endedAt: at } : one)))
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      const row = (await read($, running)).find(item => item.id === agentId)
+      if (row !== undefined) {
+        await update($, running, list => list.filter(item => item.id !== agentId))
+        const ok = e.reason === 'answer'
+        await record($, ok ? 'agent-done' : 'agent-failed', `서브 에이전트 ${ok ? '끝남' : '멈춤'}: ${row.label}`)
+      }
+      return ended
     }
+    // The main turn ended: nothing of it runs in the foreground any more.
+    await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
+    await record($, 'answer', `Claude의 답: ${excerpt(e.answer, 240)}`)
     return ended
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'composer') {
+      await update($, lastSeen, () => Date.now())
+      // The person is here: a dialog they answered is no longer waiting.
+      await update($, waiting, list => list.filter(item => item.kind !== 'permission'))
+      await record($, 'prompt', `사용자 요청: ${excerpt(e.text, 200)}`)
+    } else if (e.origin.kind === 'task-notification') {
+      const text = e.text
+      const ended = (await read($, running)).filter(item => item.taskId !== null && text.includes(item.taskId))
+      if (ended.length > 0) {
+        await update($, running, list => list.filter(item => !ended.some(one => one.id === item.id)))
+        for (const item of ended) await record($, 'background-done', `백그라운드 끝남: ${item.label}`)
+      }
+    }
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const design = await read($, spec)
-    const columns = Math.max(20, e.props.bodyColumns)
+    const columns = Math.max(24, e.props.bodyColumns)
+    const entries = await read($, log)
+    const runs = await read($, running)
+    const waits = await read($, waiting)
+    const written = await read($, summary)
+    const said = await read($, phase)
+    const seen = await read($, lastSeen)
+    const at = Math.max(await read($, now), Date.now())
 
-    if (design === null) {
-      return (
-        <Box flexDirection="column">
-          <Text dimColor>아직 대시보드가 없습니다. /dashboard 를 입력하면 Claude가 지금 작업에 맞춰 만듭니다.</Text>
-        </Box>
-      )
-    }
+    const byId = new Map(entries.map(entry => [entry.id, entry]))
+    const missed = seen === 0 ? 0 : entries.filter(entry => entry.at > seen && entry.kind !== 'prompt').length
+    const unwritten = entries.filter(entry => entry.id > (written?.covers ?? 0)).length
+    const title = written?.title || '작업 과정'
+    const head = missed > 0 ? `보신 뒤 +${missed}` : ''
 
-    const read$ = {
-      values: await read($, values),
-      errors: await read($, errors),
-      history: await read($, history),
-      approved: await read($, approved),
-      agents: await read($, agents),
-      now: Math.max(await read($, now), (await $.clock.now())),
-      updatedAt: await read($, updatedAt),
-    }
-    const every = refreshSecondsOf(design)
-    const ago = read$.updatedAt === null ? '아직 안 읽음' : `${ageText(read$.now - read$.updatedAt)} 전 갱신`
-    const hasSources = Object.keys(design.sources ?? {}).length > 0
+    const steps =
+      written !== null && written.steps.length > 0
+        ? written.steps.map(step => ({ at: byId.get(step.from)?.at ?? written.at, text: step.text }))
+        : entries
+            .filter(entry => entry.kind !== 'prompt')
+            .slice(-6)
+            .reverse()
+            .map(entry => ({ at: entry.at, text: entry.text }))
+    const waitNote = written?.waiting ?? ''
+
+    const heading = (text: string) => (
+      <Text bold color="claude">
+        {truncate(text, columns)}
+      </Text>
+    )
 
     return (
       <Box flexDirection="column">
-        {hasSources && <Text dimColor>{truncate(`${ago} · ${every}초마다`, columns)}</Text>}
-        {design.sections.map((section, s) => (
+        <Box flexDirection="row">
+          <Text bold>{truncate(title, Math.max(8, columns - width(head) - 2))}</Text>
+          <Text dimColor>{head === '' ? '' : `  ${head}`}</Text>
+        </Box>
+        <Text>{truncate(`지금  ${written?.now || said || '아직 기록이 없습니다'}`, columns)}</Text>
+
+        <Box flexDirection="column" marginTop={1}>
+          {heading('▸ 나를 기다리는 것')}
+          {waits.length === 0 && waitNote === '' && <Text dimColor>  없음</Text>}
+          {waits.map(item => (
+            <Text color="warning">{truncate(`  ${item.kind === 'question' ? '질문' : '권한 요청'}: ${item.label}  ${ageText(at - item.since)}째`, columns)}</Text>
+          ))}
+          {waitNote !== '' && <Text color="warning">{truncate(`  ${waitNote}`, columns)}</Text>}
+        </Box>
+
+        <Box flexDirection="column" marginTop={1}>
+          {heading('▸ 돌아가는 것')}
+          {runs.length === 0 && <Text dimColor>  없음</Text>}
+          {runs.map(item => {
+            const kind = item.kind === 'agent' ? '서브 에이전트' : item.background ? '백그라운드 셸' : '셸'
+            const age = `  ${ageText(at - item.startedAt)}`
+            return (
+              <Box flexDirection="column">
+                <Box flexDirection="row">
+                  <Text color="suggestion">{truncate(`  ● ${kind}  ${item.label}`, Math.max(8, columns - width(age)))}</Text>
+                  <Text dimColor>{age}</Text>
+                </Box>
+                {item.last !== '' && <Text dimColor>{truncate(`      ${item.last}`, columns)}</Text>}
+              </Box>
+            )
+          })}
+        </Box>
+
+        <Box flexDirection="column" marginTop={1}>
+          {heading(missed > 0 ? '▸ 지나온 단계  ★ 자리 비운 사이' : '▸ 지나온 단계')}
+          {steps.length === 0 && <Text dimColor>  없음</Text>}
+          {steps.map(step => {
+            const mark = seen !== 0 && step.at > seen ? '★' : ' '
+            return <Text>{truncate(`  ${mark} ${pad(ageText(at - step.at) + ' 전', 9)} ${step.text}`, columns)}</Text>
+          })}
+        </Box>
+
+        {written !== null && written.checks.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            {section.title !== undefined && section.title !== '' && (
-              <Text bold color="claude">
-                {truncate(section.title, columns)}
-              </Text>
-            )}
-            {section.items.map((item, i) => drawItem(Box, Text, item, `${s}.${i}`, columns, read$))}
+            {heading('▸ 확인한 상태')}
+            {written.checks.map(check => (
+              <Text>{truncate(`  ${check.label}  ${check.value}  (확인 ${ageText(at - (byId.get(check.from)?.at ?? written.at))} 전)`, columns)}</Text>
+            ))}
           </Box>
-        ))}
-        {Object.entries(read$.errors).map(([id, message]) => (
-          <Text color="error">{truncate(`! ${id}: ${message}`, columns)}</Text>
-        ))}
+        )}
+
+        <Box flexDirection="column" marginTop={1}>
+          {heading('▸ 막힌 것')}
+          {(written?.blocked ?? []).length === 0 ? <Text dimColor>  없음</Text> : (written?.blocked ?? []).map(text => <Text color="error">{truncate(`  ${text}`, columns)}</Text>)}
+        </Box>
+
+        <Box flexDirection="column" marginTop={1}>
+          {heading('▸ 다음')}
+          <Text dimColor={!written?.next}>{truncate(`  ${written?.next || '아직 모름'}`, columns)}</Text>
+        </Box>
+
+        <Box marginTop={1}>
+          <Text dimColor>
+            {truncate(
+              written === null ? '아직 정리 전입니다' : `${ageText(at - written.at)} 전 정리${unwritten > 0 ? ` · 새 기록 ${unwritten}개 정리 대기` : ''}`,
+              columns,
+            )}
+          </Text>
+        </Box>
       </Box>
     )
   })
 }
 
-async function submitDesign($: EngineInterface, text: string) {
-  await $.prompt.submit({ text })
+// ── Recording and waking the model ──────────────────────────────────────────
+
+async function record($: EngineInterface, kind: LogEntry['kind'], text: string) {
+  const at = Date.now()
+  await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(text, 300) }].slice(-MAX_LOG))
+  if (URGENT.has(kind)) await schedule($, SOON_MS)
+  else if (await paneShown($)) await schedule($, LATER_MS)
 }
 
-// ── Reading ─────────────────────────────────────────────────────────────────
-
-async function tick($: EngineInterface) {
-  const design = await read($, spec)
-  if (design === null) return
-  const shown = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
-  if (!shown) return
-  const at = (await $.clock.now())
-  await update($, now, () => at)
-  const last = await read($, updatedAt)
-  if (last === null || at - last >= refreshSecondsOf(design) * 1000 - 500) await refresh($, design)
+async function schedule($: EngineInterface, ms: number) {
+  const due = Date.now() + ms
+  if (timer !== undefined && timerAt <= due) return
+  timer?.cancel()
+  timerAt = due
+  timer = $.clock.after(ms, () => {
+    timer = undefined
+    timerAt = Number.POSITIVE_INFINITY
+    return summarize($)
+  })
 }
 
-async function refresh($: EngineInterface, design: Dashboard) {
-  const allowed = await read($, approved)
-  const entries = Object.entries(design.sources ?? {})
-  const readings = await Promise.all(
-    entries.map(async ([id, source]) => {
-      try {
-        return { id, value: await readSource($, source, allowed) }
-      } catch (error) {
-        return { id, error: errorText(error) }
-      }
-    }),
-  )
-
-  const fresh: Record<string, Json> = {}
-  const failed: Record<string, string> = {}
-  for (const reading of readings) {
-    if ('error' in reading && reading.error !== undefined) failed[reading.id] = reading.error
-    else if ('value' in reading && reading.value !== undefined) fresh[reading.id] = reading.value
-  }
-
-  await update($, values, old => ({ ...old, ...fresh }))
-  await update($, errors, () => failed)
-
-  // Sparklines that read one number gain a point on every refresh.
-  const points: Record<string, number> = {}
-  design.sections.forEach((section, s) =>
-    section.items.forEach((item, i) => {
-      if (item.kind !== 'sparkline' || item.from === undefined || item.from.regex !== undefined) return
-      const value = pickValue(fresh, item.from)
-      const number = toNumber(value)
-      if (number !== undefined && !Array.isArray(value)) points[`${s}.${i}`] = number
-    }),
-  )
-  if (Object.keys(points).length > 0) {
-    await update($, history, old => {
-      const out: Record<string, number[]> = { ...old }
-      for (const [key, number] of Object.entries(points)) out[key] = [...(out[key] ?? []), number].slice(-MAX_HISTORY)
-      return out
-    })
-  }
-
-  const at = (await $.clock.now())
-  await update($, updatedAt, () => at)
-  await update($, now, () => at)
+async function wake($: EngineInterface, force: boolean) {
+  if (force) await update($, summary, old => (old === null ? old : { ...old, covers: 0 }))
+  await summarize($)
 }
 
-async function readSource($: EngineInterface, source: Source, allowed: boolean): Promise<Json> {
-  let text: string
-  if (source.command !== undefined) {
-    if (!allowed) throw new Error('명령 실행이 허용되지 않음')
-    const ran = await $.process.run(source.command, { timeoutMs: 20_000 })
-    if (ran.exitCode !== 0 && ran.stdout.trim() === '') throw new Error(firstLine(ran.stderr) || `종료 코드 ${ran.exitCode}`)
-    text = ran.stdout
-  } else if (source.file !== undefined) {
-    const file = await $.fs.read(source.file)
-    text = typeof file === 'string' ? file : ''
-  } else if (source.url !== undefined) {
-    const response = await $.http.fetch(source.url)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    text = response.text
-  } else {
-    throw new Error('command, file, url 중 하나가 필요함')
-  }
-  return parseText(text.slice(0, MAX_SOURCE_CHARS))
-}
-
-async function askToRun($: EngineInterface, design: Dashboard): Promise<boolean> {
-  const lines = Object.entries(design.sources ?? {})
-    .filter(([, source]) => source.command !== undefined)
-    .map(([id, source]) => `${id}: ${(source.command ?? []).join(' ')}`)
-  const question = `대시보드가 다음 명령을 ${refreshSecondsOf(design)}초마다 실행합니다. 허용할까요?\n${lines.join('\n')}`
+async function paneShown($: EngineInterface): Promise<boolean> {
   try {
-    const answer = await $.ui.ask(question, { header: 'Dashboard', options: ['허용', '명령 없이 띄우기'] })
-    return answer === '허용'
+    return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
   } catch {
+    // Where no surface lists panes, nothing is shown: the log still keeps going.
     return false
   }
 }
 
-// ── Drawing ─────────────────────────────────────────────────────────────────
-
-type Reads = {
-  values: Record<string, Json>
-  errors: Record<string, string>
-  history: Record<string, number[]>
-  approved: boolean
-  agents: AgentRow[]
-  now: number
-  updatedAt: number | null
+async function tick($: EngineInterface) {
+  const busyNow = (await read($, running)).length > 0 || (await read($, waiting)).length > 0
+  if (busyNow && (await paneShown($))) await update($, now, () => Date.now())
 }
 
-// An element of the surface's table, drawn through the JSX factory.
-type Draw = Parameters<typeof h>[0]
-type Node = ReturnType<typeof h>
+async function summarize($: EngineInterface) {
+  if (busy) {
+    again = true
+    return
+  }
+  busy = true
+  try {
+    const entries = await read($, log)
+    const previous = await read($, summary)
+    const newest = entries[entries.length - 1]?.id ?? 0
+    if (newest === 0 || (previous !== null && previous.covers >= newest)) return
 
-function drawItem(BoxEl: unknown, TextEl: unknown, item: Item, key: string, columns: number, r: Reads): Node {
-  const Box = BoxEl as Draw
-  const Text = TextEl as Draw
-  const line = (text: string, props: Record<string, unknown> = {}) => h(Text, props, truncate(text, columns))
-
-  switch (item.kind) {
-    case 'text': {
-      const text = item.from !== undefined ? textOf(pickValue(r.values, item.from)) : item.text ?? ''
-      return h(Text, { ...toneProps(item.tone), wrap: 'wrap' }, text === '' ? '—' : text)
+    const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), Date.now())
+    const text = await complete($, prompt)
+    if (text === undefined) return
+    const written = parseSummary(text, new Set(entries.map(entry => entry.id)))
+    if (written === undefined) return
+    await update($, summary, () => ({ ...written, covers: newest, at: Date.now() }))
+  } finally {
+    busy = false
+    if (again) {
+      again = false
+      await schedule($, SOON_MS)
     }
-    case 'stat': {
-      const raw = item.from !== undefined ? pickValue(r.values, item.from) : item.value
-      const value = raw === undefined || raw === null ? '—' : `${textOf(raw)}${item.unit ?? ''}`
-      const label = `${item.label}  `
-      return h(Box, 
-        { flexDirection: 'row' },
-        h(Text, { dimColor: true }, label),
-        h(Text, { bold: true, ...toneProps(item.tone) }, truncate(value, Math.max(4, columns - width(label)))),
-      )
-    }
-    case 'progress': {
-      const [current, total] = progressOf(item, r.values)
-      const label = `${item.label}  `
-      if (current === undefined) return h(Box, { flexDirection: 'row' }, h(Text, { dimColor: true }, label), h(Text, { dimColor: true }, '—'))
-      const ratio = total !== undefined && total > 0 ? Math.min(1, Math.max(0, current / total)) : undefined
-      const tail = total !== undefined ? ` ${trimNumber(current)}/${trimNumber(total)}${ratio !== undefined ? ` ${Math.round(ratio * 100)}%` : ''}` : ` ${trimNumber(current)}`
-      const barWidth = Math.max(4, Math.min(30, columns - width(label) - width(tail)))
-      const filled = ratio === undefined ? 0 : Math.round(ratio * barWidth)
-      return h(Box, 
-        { flexDirection: 'row' },
-        h(Text, { dimColor: true }, label),
-        h(Text, { color: 'success' }, '█'.repeat(filled)),
-        h(Text, { color: 'subtle' }, '░'.repeat(barWidth - filled)),
-        h(Text, {}, tail),
-      )
-    }
-    case 'sparkline': {
-      const points = sparkPoints(item, key, r)
-      const label = `${item.label}  `
-      if (points.length === 0) return h(Box, { flexDirection: 'row' }, h(Text, { dimColor: true }, label), h(Text, { dimColor: true }, '—'))
-      const lastText = ` ${trimNumber(points[points.length - 1]!)}`
-      const room = Math.max(4, columns - width(label) - width(lastText))
-      return h(Box, 
-        { flexDirection: 'row' },
-        h(Text, { dimColor: true }, label),
-        h(Text, { color: 'suggestion' }, sparkline(points.slice(-room))),
-        h(Text, { bold: true }, lastText),
-      )
-    }
-    case 'status': {
-      const state = item.from !== undefined ? textOf(pickValue(r.values, item.from)) : item.state ?? ''
-      const look = statusLook(state)
-      const head = `${look.glyph} ${item.label}`
-      const rest = state === '' ? '' : `  ${state}`
-      return h(Box, 
-        { flexDirection: 'column' },
-        h(Box, { flexDirection: 'row' }, h(Text, { color: look.color, bold: true }, truncate(head, columns)), h(Text, { color: look.color }, truncate(rest, Math.max(0, columns - width(head))))),
-        item.detail !== undefined && item.detail !== '' ? line(`  ${item.detail}`, { dimColor: true }) : null,
-      )
-    }
-    case 'table': {
-      const rows = tableRows(item, r.values).slice(0, MAX_TABLE_ROWS)
-      return drawTable(Box, Text, item.columns, rows, columns)
-    }
-    case 'agents':
-      return drawAgents(Box, Text, r.agents, r.now, columns)
-    default:
-      return null
   }
 }
 
-function drawTable(Box: Draw, Text: Draw, head: string[], rows: string[][], columns: number): Node {
-  if (head.length === 0) return null
-  const gap = 2
-  const widths = head.map((title, c) => Math.max(width(title), ...rows.map(row => width(row[c] ?? ''))))
-  // Narrow the widest columns until the table fits the pane.
-  while (widths.reduce((a, b) => a + b, 0) + gap * (widths.length - 1) > columns) {
-    const widest = widths.indexOf(Math.max(...widths))
-    if (widths[widest]! <= 3) break
-    widths[widest] = widths[widest]! - 1
+async function complete($: EngineInterface, prompt: string): Promise<string | undefined> {
+  const ask = (model: string) => $.model.complete({ model, system: SYSTEM, prompt, maxTokens: 900, effort: 'low', timeoutMs: 30_000 })
+  let answer
+  try {
+    answer = await ask(fallback ?? preferred)
+  } catch {
+    // The organization may not allow the preferred model: use the session's.
+    if (fallback !== undefined) return undefined
+    fallback = await $.session.model()
+    answer = await ask(fallback)
   }
-  const row = (cells: string[]) => cells.map((cell, c) => pad(truncate(cell, widths[c]!), widths[c]!)).join(' '.repeat(gap)).trimEnd()
-  return h(Box, 
-    { flexDirection: 'column' },
-    h(Text, { dimColor: true }, row(head)),
-    ...(rows.length === 0 ? [h(Text, { dimColor: true }, '—')] : rows.map(cells => h(Text, {}, row(cells)))),
-  )
+  return answer.isAnswered ? answer.text : undefined
 }
 
-function drawAgents(Box: Draw, Text: Draw, list: AgentRow[], at: number, columns: number): Node {
-  if (list.length === 0) return h(Text, { dimColor: true }, '서브 에이전트 없음')
-  const ordered = [...list].sort((a, b) => Number(a.status !== 'running') - Number(b.status !== 'running') || b.startedAt - a.startedAt).slice(0, 8)
-  return h(Box, 
-    { flexDirection: 'column' },
-    ...ordered.map(agent => {
-      const look = statusLook(agent.status)
-      const elapsed = ageText((agent.endedAt ?? at) - agent.startedAt)
-      const head = `${look.glyph} ${agent.type}`
-      const meta = `  ${elapsed} · 도구 ${agent.tools}회`
-      const what = agent.status === 'running' && agent.last !== '' ? agent.last : agent.description
-      return h(Box, 
-        { flexDirection: 'column' },
-        h(Box, { flexDirection: 'row' }, h(Text, { color: look.color, bold: true }, truncate(head, columns)), h(Text, { dimColor: true }, truncate(meta, Math.max(0, columns - width(head))))),
-        h(Text, { dimColor: true }, truncate(`  ${what}`, columns)),
-      )
-    }),
-  )
+async function startShell($: EngineInterface, id: string, input: Record<string, unknown>): Promise<number> {
+  const label = shellLabel(input)
+  const background = input.run_in_background === true
+  const startedAt = Date.now()
+  const item: RunningItem = { id, kind: 'shell', label, startedAt, background, taskId: null, last: '' }
+  await update($, running, list => [...list, item])
+  await record($, 'shell', `${background ? '백그라운드 셸 시작' : '셸 실행'}: ${label}`)
+  return startedAt
+}
+
+async function endShell($: EngineInterface, id: string, input: Record<string, unknown>, ran: ToolCallResult, startedAt: number) {
+  const label = shellLabel(input)
+  const failed = ran.deny !== undefined || ran.isError === true
+  const result = (ran.result ?? {}) as { stdout?: unknown; stderr?: unknown; backgroundTaskId?: unknown }
+
+  if (input.run_in_background === true && !failed) {
+    const taskId = typeof result.backgroundTaskId === 'string' ? result.backgroundTaskId : null
+    await update($, running, list => list.map(item => (item.id === id ? { ...item, taskId } : item)))
+    return
+  }
+  await update($, running, list => list.filter(item => item.id !== id))
+  const output = outputOf(result.stdout, result.stderr)
+  const took = ageText(Date.now() - startedAt)
+  await record($, failed ? 'shell-failed' : 'shell-done', `${failed ? '셸 실패' : '셸 끝남'} (${took}): ${label}${output === '' ? '' : ` → ${output}`}`)
 }
 
 // ── Pure helpers ────────────────────────────────────────────────────────────
 
-/** The tool's input as a dashboard, or why it is not one. */
-export function toDashboard(input: unknown): Dashboard | string {
-  if (typeof input !== 'object' || input === null) return '입력이 객체가 아님'
-  const raw = input as Record<string, unknown>
-  if (typeof raw.title !== 'string' || raw.title.trim() === '') return 'title이 필요함'
-  if (!Array.isArray(raw.sections) || raw.sections.length === 0) return 'sections가 하나 이상 필요함'
-  const sources: Record<string, Source> = {}
-  if (typeof raw.sources === 'object' && raw.sources !== null) {
-    for (const [id, value] of Object.entries(raw.sources as Record<string, unknown>)) {
-      if (typeof value !== 'object' || value === null) continue
-      const source = value as Record<string, unknown>
-      if (Array.isArray(source.command) && source.command.length > 0 && source.command.every(part => typeof part === 'string')) sources[id] = { command: source.command as string[] }
-      else if (typeof source.file === 'string') sources[id] = { file: source.file }
-      else if (typeof source.url === 'string') sources[id] = { url: source.url }
-    }
-  }
-  const sections = (raw.sections as unknown[])
-    .filter((section): section is Record<string, unknown> => typeof section === 'object' && section !== null)
-    .map(section => ({
-      ...(typeof section.title === 'string' ? { title: section.title } : {}),
-      items: (Array.isArray(section.items) ? section.items : []).filter(isItem),
-    }))
-  const refreshSeconds = typeof raw.refreshSeconds === 'number' ? raw.refreshSeconds : undefined
-  return JSON.parse(JSON.stringify({ title: raw.title.trim(), refreshSeconds, sources, sections })) as Dashboard
+/** What the small model reads: the log, what runs and waits, and what it wrote last. */
+export function promptFor(
+  entries: readonly LogEntry[],
+  previous: Summary | null,
+  runs: readonly RunningItem[],
+  waits: readonly WaitingItem[],
+  said: string,
+  at: number,
+): string {
+  const covered = previous?.covers ?? 0
+  const lines = entries.map(entry => `#${entry.id} ${ageText(at - entry.at)} 전${entry.id > covered ? ' (새)' : ''} ${entry.text}`)
+  return [
+    said === '' ? '' : `Claude가 알린 지금 단계: ${said}`,
+    `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${item.label} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
+    `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => item.label).join('; ')}`,
+    previous === null ? '' : `지난번에 쓴 대시보드: ${JSON.stringify({ title: previous.title, now: previous.now, steps: previous.steps, checks: previous.checks, blocked: previous.blocked, next: previous.next, waiting: previous.waiting })}`,
+    '기록 (오래된 것부터):',
+    ...lines,
+  ]
+    .filter(line => line !== '')
+    .join('\n')
 }
 
-function isItem(value: unknown): value is Item {
-  if (typeof value !== 'object' || value === null) return false
-  const kind = (value as Record<string, unknown>).kind
-  return ['text', 'stat', 'progress', 'sparkline', 'status', 'table', 'agents'].includes(String(kind))
+/** The model's JSON as a summary, or undefined when it is not one. */
+export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summary, 'covers' | 'at'> | undefined {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end <= start) return undefined
+  let raw: Record<string, unknown>
+  try {
+    raw = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+  const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
+  const list = (value: unknown) => (Array.isArray(value) ? value : [])
+  const ref = (value: unknown) => (typeof value === 'number' && ids.has(value) ? value : 0)
+  return {
+    title: str(raw.title, 30),
+    now: str(raw.now, 80),
+    steps: list(raw.steps)
+      .map(step => (typeof step === 'object' && step !== null ? (step as Record<string, unknown>) : {}))
+      .map(step => ({ from: ref(step.from), text: str(step.text, 60) }))
+      .filter(step => step.text !== '')
+      .slice(0, 8),
+    checks: list(raw.checks)
+      .map(check => (typeof check === 'object' && check !== null ? (check as Record<string, unknown>) : {}))
+      .map(check => ({ label: str(check.label, 20), value: str(check.value, 30), from: ref(check.from) }))
+      .filter(check => check.label !== '' && check.value !== '')
+      .slice(0, 4),
+    blocked: list(raw.blocked)
+      .map(item => str(item, 60))
+      .filter(item => item !== '')
+      .slice(0, 4),
+    next: str(raw.next, 60),
+    waiting: str(raw.waiting, 60),
+  }
 }
 
-export function refreshSecondsOf(design: Dashboard): number {
-  const asked = design.refreshSeconds ?? DEFAULT_REFRESH_SECONDS
-  return Math.max(MIN_REFRESH_SECONDS, Math.round(Number.isFinite(asked) ? asked : DEFAULT_REFRESH_SECONDS))
+function inputOf(e: object): Record<string, unknown> {
+  const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, ...rest } = e as Record<string, unknown>
+  return rest
 }
 
-export function parseText(text: string): Json {
-  const trimmed = text.trim()
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try {
-      return JSON.parse(trimmed) as Json
-    } catch {
-      // Not JSON after all: keep the text.
-    }
-  }
-  return trimmed
+function shellLabel(input: Record<string, unknown>): string {
+  const description = typeof input.description === 'string' ? input.description.trim() : ''
+  if (description !== '') return excerpt(description, 80)
+  return excerpt(mask(typeof input.command === 'string' ? input.command : ''), 80)
 }
 
-/** What a pick points at in the readings. */
-export function pickValue(readings: Record<string, Json>, pick: Pick): Json | undefined {
-  let value: Json | undefined = readings[pick.source]
-  if (value === undefined) return undefined
-  if (pick.path !== undefined && pick.path !== '') {
-    for (const part of pick.path.replace(/\[(\d+)\]/g, '.$1').split('.').filter(one => one !== '')) {
-      if (value === null || typeof value !== 'object') return undefined
-      value = Array.isArray(value) ? value[Number(part)] : (value as Record<string, Json>)[part]
-      if (value === undefined) return undefined
-    }
-  }
-  if (pick.regex !== undefined && pick.regex !== '') {
-    const text = typeof value === 'string' ? value : JSON.stringify(value)
-    let pattern: RegExp
-    try {
-      pattern = new RegExp(pick.regex)
-    } catch {
-      return undefined
-    }
-    const match = pattern.exec(text)
-    if (match === null) return undefined
-    return match[1] ?? match[0]
-  }
-  return value
+function questionOf(input: Record<string, unknown>): string {
+  const first = Array.isArray(input.questions) ? (input.questions[0] as Record<string, unknown> | undefined) : undefined
+  return excerpt(typeof first?.question === 'string' ? first.question : '질문', 80)
 }
 
-function sparkPoints(item: Extract<Item, { kind: 'sparkline' }>, key: string, r: Reads): number[] {
-  if (item.from === undefined) return (item.values ?? []).filter(Number.isFinite)
-  if (item.from.regex !== undefined && item.from.regex !== '') {
-    const source = r.values[item.from.source]
-    if (source === undefined) return []
-    const text = typeof source === 'string' ? source : JSON.stringify(source)
-    let pattern: RegExp
-    try {
-      pattern = new RegExp(item.from.regex, 'g')
-    } catch {
-      return []
-    }
-    return [...text.matchAll(pattern)].map(match => Number(match[1] ?? match[0])).filter(Number.isFinite)
-  }
-  const value = pickValue(r.values, item.from)
-  if (Array.isArray(value)) return value.map(one => toNumber(one)).filter((one): one is number => one !== undefined)
-  return r.history[key] ?? []
-}
-
-export function progressOf(item: Extract<Item, { kind: 'progress' }>, readings: Record<string, Json>): [number | undefined, number | undefined] {
-  let current = item.current
-  let total = item.total
-  if (item.from !== undefined) {
-    const value = pickValue(readings, item.from)
-    if (typeof value === 'string' && /^\s*[\d.]+\s*\/\s*[\d.]+\s*$/.test(value)) {
-      const [a, b] = value.split('/').map(part => Number(part.trim()))
-      current = a
-      total = b
-    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-      current = toNumber(value.current) ?? current
-      total = toNumber(value.total) ?? total
-    } else {
-      current = toNumber(value) ?? undefined
-    }
-  }
-  if (item.totalFrom !== undefined) total = toNumber(pickValue(readings, item.totalFrom)) ?? total
-  return [current, total]
-}
-
-export function tableRows(item: Extract<Item, { kind: 'table' }>, readings: Record<string, Json>): string[][] {
-  if (item.from === undefined) return (item.rows ?? []).map(row => row.map(cell => String(cell)))
-  const value = pickValue(readings, item.from)
-  if (Array.isArray(value)) {
-    return value.map(row => {
-      if (Array.isArray(row)) return row.map(cell => textOf(cell))
-      if (row !== null && typeof row === 'object') return item.columns.map(column => textOf((row as Record<string, Json>)[column] ?? ''))
-      return [textOf(row)]
-    })
-  }
-  if (typeof value === 'string') {
-    return value
-      .split('\n')
-      .map(lineText => lineText.trim())
-      .filter(lineText => lineText !== '')
-      .map(lineText => lineText.split(/\t|\s{2,}/))
-  }
-  return []
-}
-
-function activityOf(e: Record<string, unknown>): string {
-  const tool = String(e.tool ?? '')
-  if (typeof e.description === 'string' && e.description !== '') return `${tool}: ${e.description}`
-  if (typeof e.file_path === 'string') return `${tool}: ${e.file_path.split('/').pop()}`
-  if (typeof e.pattern === 'string') return `${tool}: ${e.pattern}`
+export function stepOf(tool: string, input: Record<string, unknown>): string {
+  if (tool === 'Bash') return `셸: ${shellLabel(input)}`
+  if (typeof input.file_path === 'string') return `${tool}: ${baseName(input.file_path)}`
+  if (typeof input.query === 'string') return `${tool}: ${excerpt(input.query, 60)}`
+  if (typeof input.url === 'string') return `${tool}: ${excerpt(input.url, 60)}`
+  if (typeof input.pattern === 'string') return `${tool}: ${excerpt(input.pattern, 60)}`
+  if (typeof input.description === 'string') return `${tool}: ${excerpt(input.description, 60)}`
   return tool
 }
 
-export function statusLook(state: string): { glyph: string; color: string } {
-  const s = state.toLowerCase()
-  if (/fail|error|dead|crash|killed|stopped|실패|오류|종료됨|죽/.test(s)) return { glyph: '✗', color: 'error' }
-  if (/done|success|complete|finished|ok|passed|완료|성공|끝/.test(s)) return { glyph: '✓', color: 'success' }
-  if (/wait|pending|queued|idle|paused|대기|준비/.test(s)) return { glyph: '◌', color: 'warning' }
-  if (/run|active|busy|train|progress|working|실행|학습|진행/.test(s)) return { glyph: '●', color: 'suggestion' }
-  return { glyph: '○', color: 'subtle' }
+function baseName(path: unknown): string {
+  return typeof path === 'string' ? path.split('/').pop() ?? path : ''
 }
 
-function toneProps(tone: Tone | undefined): Record<string, unknown> {
-  switch (tone) {
-    case 'good':
-      return { color: 'success' }
-    case 'warn':
-      return { color: 'warning' }
-    case 'bad':
-      return { color: 'error' }
-    case 'muted':
-      return { dimColor: true }
-    case 'accent':
-      return { color: 'suggestion' }
-    default:
-      return {}
+function outputOf(stdout: unknown, stderr: unknown): string {
+  const text = [stdout, stderr].filter((part): part is string => typeof part === 'string' && part.trim() !== '').join('\n')
+  if (text === '') return ''
+  return mask(text.trim().slice(-240)).replace(/\s+/g, ' ').trim()
+}
+
+/** JSON with sorted keys, so two spellings of one input compare equal. */
+export function stableKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableKey).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .filter(key => (value as Record<string, unknown>)[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${stableKey((value as Record<string, unknown>)[key])}`)
+      .join(',')}}`
   }
+  return JSON.stringify(value) ?? 'null'
 }
 
-export function sparkline(points: number[]): string {
-  const bars = '▁▂▃▄▅▆▇█'
-  const low = Math.min(...points)
-  const high = Math.max(...points)
-  if (high === low) return bars[3]!.repeat(points.length)
-  return points.map(point => bars[Math.round(((point - low) / (high - low)) * (bars.length - 1))]).join('')
+// Hides what looks like a secret before text leaves for the model.
+export function mask(text: string): string {
+  return text
+    .replace(/(\b[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH)[A-Za-z0-9_]*\s*=\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
+    .replace(/(--?(?:token|password|passwd|secret|api-?key|auth)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi, '$1***')
+    .replace(/(Bearer\s+)\S+/gi, '$1***')
+    .replace(/\b(?:sk|ghp|gho|ghs|github_pat|xox[abprs]|AKIA)[-_A-Za-z0-9]{8,}/g, '***')
+    .replace(/\b[A-Za-z0-9_]{32,}\b/g, '***')
 }
 
-function toNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim() !== '') {
-    const number = Number(value.trim().replace(/,/g, ''))
-    return Number.isFinite(number) ? number : undefined
-  }
-  return undefined
-}
-
-function textOf(value: unknown): string {
-  if (value === undefined || value === null) return ''
-  if (typeof value === 'number') return trimNumber(value)
-  if (typeof value === 'string') return value
-  return JSON.stringify(value)
-}
-
-function trimNumber(value: number): string {
-  if (Number.isInteger(value)) return String(value)
-  return Math.abs(value) >= 100 ? value.toFixed(1) : String(Number(value.toPrecision(4)))
+function excerpt(text: string, max: number): string {
+  return truncate(text.replace(/\s+/g, ' ').trim(), max)
 }
 
 export function ageText(ms: number): string {
@@ -686,14 +557,6 @@ export function ageText(ms: number): string {
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}분`
   return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
-}
-
-function firstLine(text: string): string {
-  return text.split('\n').map(one => one.trim()).find(one => one !== '') ?? ''
-}
-
-function errorText(error: unknown): string {
-  return truncate(firstLine(error instanceof Error ? error.message : String(error)), 80)
 }
 
 // Terminal columns: Hangul, CJK and full-width forms take two.

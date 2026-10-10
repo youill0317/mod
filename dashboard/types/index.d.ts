@@ -1,75 +1,70 @@
-/** Any value the state can hold. */
-export type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
-
-/** How an item looks: its color on screen. */
-export type Tone = 'normal' | 'good' | 'warn' | 'bad' | 'muted' | 'accent'
-
-/** Where a live value is read from, again on every refresh: exactly one of the three. */
-export type Source = {
-  /** A command run without a shell, its standard output read. Needs the person's approval. */
-  command?: string[]
-  /** A text file, relative to the working directory or absolute. */
-  file?: string
-  /** A URL fetched with GET. */
-  url?: string
+/** One thing that happened in the session, as the dashboard keeps it. */
+export type LogEntry = {
+  id: number
+  at: number
+  kind:
+    | 'prompt'
+    | 'signal'
+    | 'shell'
+    | 'shell-done'
+    | 'shell-failed'
+    | 'background-done'
+    | 'agent'
+    | 'agent-done'
+    | 'agent-failed'
+    | 'edit'
+    | 'tool'
+    | 'permission'
+    | 'question'
+    | 'answer'
+  text: string
 }
 
-/** Which part of a source an item shows. */
-export type Pick = {
-  /** The source's id in `sources`. */
-  source: string
-  /** A path into the source's JSON, like `runs.0.loss` or `runs[0].loss`. */
-  path?: string
-  /** A regular expression over the source's text: its first group, or the whole match. */
-  regex?: string
-}
-
-export type Item =
-  | { kind: 'text'; text?: string; from?: Pick; tone?: Tone }
-  | { kind: 'stat'; label: string; value?: string | number; from?: Pick; unit?: string; tone?: Tone }
-  | { kind: 'progress'; label: string; current?: number; total?: number; from?: Pick; totalFrom?: Pick }
-  | { kind: 'sparkline'; label: string; values?: number[]; from?: Pick }
-  | { kind: 'status'; label: string; state?: string; detail?: string; from?: Pick }
-  | { kind: 'table'; columns: string[]; rows?: (string | number)[][]; from?: Pick }
-  | { kind: 'agents' }
-
-export type Section = { title?: string; items: Item[] }
-
-/** The dashboard Claude designs. */
-export type Dashboard = {
-  title: string
-  refreshSeconds?: number
-  sources?: Record<string, Source>
-  sections: Section[]
-}
-
-/** One subagent as the dashboard tracks it. */
-export type AgentRow = {
+/** A shell or a subagent that is running now. */
+export type RunningItem = {
   id: string
-  type: string
-  description: string
+  kind: 'shell' | 'agent'
+  label: string
   startedAt: number
-  endedAt: number | null
-  tools: number
+  background: boolean
+  /** The background task's id, to end it when its notification arrives. */
+  taskId: string | null
+  /** A subagent's latest step. */
   last: string
-  status: 'running' | 'done' | 'failed'
+}
+
+/** Something that waits on the person. */
+export type WaitingItem = {
+  id: string
+  kind: 'permission' | 'question'
+  label: string
+  since: number
+}
+
+/** What the small model wrote, from the log. */
+export type Summary = {
+  title: string
+  now: string
+  steps: { from: number; text: string }[]
+  checks: { label: string; value: string; from: number }[]
+  blocked: string[]
+  next: string
+  waiting: string
+  /** The last log id this summary covers. */
+  covers: number
+  at: number
 }
 
 declare module 'claude-code' {
   interface PluginState {
     dashboard: {
-      spec: Dashboard | null
-      /** Whether the person allowed the spec's commands to run. */
-      approved: boolean
-      /** Each source's last reading, parsed as JSON when it is JSON. */
-      values: Record<string, Json>
-      /** Each source's last error, by id. */
-      errors: Record<string, string>
-      /** Sparkline readings kept across refreshes, by item key. */
-      history: Record<string, number[]>
-      updatedAt: number | null
+      log: LogEntry[]
+      running: RunningItem[]
+      waiting: WaitingItem[]
+      summary: Summary | null
+      phase: string
+      lastSeen: number
       now: number
-      agents: AgentRow[]
     }
   }
 }
