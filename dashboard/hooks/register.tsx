@@ -417,17 +417,7 @@ function drawGraph(Box: Draw, Text: Draw, nodes: readonly GraphNode[], columns: 
     )
   }
   // Rows of columns that fit the pane; the next row continues the path.
-  const rows: GraphNode[][] = [[]]
-  let used = 0
-  nodes.forEach((node, i) => {
-    const need = columnWidth(node, i === nodes.length - 1)
-    if (used > 0 && used + need > columns - 2) {
-      rows.push([])
-      used = 0
-    }
-    rows[rows.length - 1]!.push(node)
-    used += need
-  })
+  const rows = graphRows(nodes.map((node, i) => columnWidth(node, i === nodes.length - 1)), columns - 2).map(row => row.map(i => nodes[i]!))
   return h(
     Box,
     { flexDirection: 'column' },
@@ -440,6 +430,28 @@ function drawGraph(Box: Draw, Text: Draw, nodes: readonly GraphNode[], columns: 
       ),
     ),
   )
+}
+
+/**
+ * Which columns go on each row: as few rows as fit `room`, the columns spread
+ * evenly over them, so no box is left alone on a last row.
+ */
+export function graphRows(widths: readonly number[], room: number): number[][] {
+  const greedy: number[][] = [[]]
+  let used = 0
+  widths.forEach((need, i) => {
+    if (used > 0 && used + need > room) {
+      greedy.push([])
+      used = 0
+    }
+    greedy[greedy.length - 1]!.push(i)
+    used += need
+  })
+  const per = Math.ceil(widths.length / greedy.length)
+  const even = greedy.map((_, r) => widths.map((_, i) => i).slice(r * per, (r + 1) * per)).filter(row => row.length > 0)
+  // A column's arrow is part of its width: the last on a row hangs one, which still fits.
+  const fits = even.length === greedy.length && even.every(row => row.reduce((sum, i) => sum + widths[i]!, 0) <= room)
+  return fits ? even : greedy
 }
 
 function drawTable(Box: Draw, Text: Draw, head: readonly string[], rows: readonly { cells: readonly string[]; tone: Tone; age: string }[], columns: number): Node {
@@ -685,13 +697,13 @@ export function nodesAcross(columns: number): number {
 }
 
 /**
- * What fits in a pane with `rows` for the blocks: the graph's boxes (a row of
- * them, two when one row holds fewer than three or the pane is tall), its
- * branches, and the rows left for the other blocks.
+ * What fits in a pane with `rows` for the blocks: the graph's boxes (one row in
+ * a wide pane; two in a narrower one with the rows for it, or one too narrow for
+ * three), its branches, and the rows left for the other blocks.
  */
 export function layoutFor(columns: number, rows: number): { across: number; nodes: number; branches: number; rest: number } {
   const across = nodesAcross(columns)
-  const lines = across < 3 || rows >= 30 ? 2 : 1
+  const lines = across >= 6 ? 1 : across < 3 || rows >= 20 ? 2 : 1
   const nodes = Math.min(8, across * lines)
   // A row of boxes takes 4 rows and 1 between; a branch under a box takes 6.
   let left = rows - (4 * lines + (lines - 1))

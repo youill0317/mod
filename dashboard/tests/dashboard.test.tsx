@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { fitOf, inOrder, parseSummary, promptFor, repeatsValue, roomFor, stableKey } from '../hooks/register'
+import { fitOf, graphRows, inOrder, parseSummary, promptFor, repeatsValue, roomFor, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
@@ -228,13 +228,21 @@ describe('helpers', () => {
 
   test('the room left for the blocks takes off the lines above and below them', () => {
     const run = { id: 'x', kind: 'agent' as const, label: '조사', startedAt: 0, background: false, taskId: null, last: 'Grep' }
-    // 32 rows for the blocks: two rows of six boxes (9), two branches (12), 10 left and 1 between.
-    expect(roomFor({ columns: 100, rows: 40 }, [run], [])).toBe('창: 가로 100칸, 세로 40줄. graph는 상자 8개까지(한 줄에 6개씩), 갈래는 모두 합쳐 2개까지. graph 말고 다른 블록은 모두 합쳐 10줄 안에 넣는다.')
+    // 32 rows for the blocks: a row of six boxes (4), two branches (12), 15 left and 1 between.
+    expect(roomFor({ columns: 100, rows: 40 }, [run], [])).toBe('창: 가로 100칸, 세로 40줄. graph는 상자 6개까지(한 줄에 6개씩), 갈래는 모두 합쳐 2개까지. graph 말고 다른 블록은 모두 합쳐 15줄 안에 넣는다.')
     // A narrow, short pane: four boxes in two rows and no room for anything else.
     expect(roomFor({ columns: 40, rows: 14 }, [], [])).toBe('창: 가로 40칸, 세로 14줄. graph는 상자 4개까지(한 줄에 2개씩), 갈래는 넣지 않는다. graph 말고 다른 블록은 넣지 않는다.')
     expect(fitOf({ columns: 100, rows: 40 })).toBe(fitOf({ columns: 98, rows: 41 }))
     expect(fitOf({ columns: 100, rows: 40 })).not.toBe(fitOf({ columns: 100, rows: 20 }))
     expect(fitOf(null)).toBe('')
+  })
+
+  test('boxes that wrap are spread evenly over the rows', () => {
+    // Seven fit on the first row and one is left: four and four instead.
+    expect(graphRows([13, 13, 13, 13, 13, 13, 13, 10], 98)).toEqual([[0, 1, 2, 3], [4, 5, 6, 7]])
+    expect(graphRows([13, 13, 13], 98)).toEqual([[0, 1, 2]])
+    // Spread evenly the first row would not fit: the greedy rows stand.
+    expect(graphRows([40, 40, 10, 10, 10], 90)).toEqual([[0, 1, 2], [3, 4]])
   })
 
   test('the answer is read even around a code fence, and unknown log ids are dropped', () => {
