@@ -66,7 +66,8 @@ describe('the progress dashboard', () => {
 
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /Colab 학습 재개/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /지금 {2}체크포인트를 Kaggle로/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^체크포인트를 Kaggle로 옮기는 중$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /지금/ })).toBeUndefined()
     // The flow of stages
     expect(await ui.find({ type: 'Text', text: '✓ 체크포인트 확인' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '● Kaggle로 이동' })).toBeDefined()

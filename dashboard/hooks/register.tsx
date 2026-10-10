@@ -40,12 +40,12 @@ const SYSTEM = [
   '너는 Claude Code 작업의 진행 대시보드를 쓴다. 사용자가 전체 작업 과정을 한눈에 파악하고 통제할 수 있게 돕는 것이 목적이다.',
   '결과물, 계획, 파일 내용은 쓰지 않는다. 작업이 어떻게 흘러왔고 지금 어디에 있는지만 보여 준다.',
   '실행 중인 것과 사용자를 기다리는 것은 화면 맨 위에 따로 나오므로 블록으로 만들지 않는다.',
-  '글보다 도식과 표로 보여 준다. 문장은 최소로 쓴다.',
+  '글보다 도식과 표로 보여 준다. 문장은 최소로 쓴다. 보면 아는 것을 글로 덧붙이지 않는다("지금", "현황" 같은 말, 열 이름을 되풀이하는 제목).',
   'JSON 하나만 출력한다. 형식:',
-  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일, 30자 이내", "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 25자 이내, 아니면 빈 문자열", "blocks": [블록...]}',
+  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일을 머리말 없이, 30자 이내", "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 25자 이내, 아니면 빈 문자열", "blocks": [블록...]}',
   '블록 종류:',
   '- {"kind": "flow", "title": "", "steps": [{"label": "8자 이내", "state": "done|now|todo|failed"}]}  작업의 큰 단계 흐름. 지난 단계, 지금 단계, 다음 단계를 4~7개로. 거의 항상 첫 블록으로 둔다.',
-  '- {"kind": "table", "title": "6자 이내", "columns": ["열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
+  '- {"kind": "table", "title": "표만으로 무엇인지 모를 때만 6자 이내, 아니면 빈 문자열", "columns": ["열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
   '- {"kind": "bars", "title": "6자 이내", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등).',
   '- {"kind": "metrics", "title": "", "items": [{"label": "8자 이내", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  핵심 숫자 2~4개.',
   '- {"kind": "list", "title": "6자 이내", "items": [{"text": "30자 이내", "tone": "..."}]}  막힌 것처럼 꼭 글이 필요한 것만, 최대 3줄.',
@@ -242,7 +242,7 @@ export const register: Register = (on, options) => {
         ? written.blocks
         : recent.length === 0
           ? []
-          : [{ kind: 'table', title: '최근 기록', columns: ['일'], rows: recent.map(entry => ({ cells: [entry.text], tone: 'normal' as const, from: entry.id })) }]
+          : [{ kind: 'table', title: '', columns: ['최근 기록'], rows: recent.map(entry => ({ cells: [entry.text], tone: 'normal' as const, from: entry.id })) }]
     const waitNote = written?.waiting ?? ''
 
     // What waits on the person and what runs, each line led by its symbol.
@@ -268,7 +268,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Text bold>{truncate(title, columns)}</Text>
-        <Text>{truncate(`지금  ${written?.now || said || '아직 기록이 없습니다'}`, columns)}</Text>
+        {(written?.now || said) !== '' && <Text>{truncate(written?.now || said, columns)}</Text>}
 
         {live.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
