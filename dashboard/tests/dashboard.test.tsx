@@ -17,7 +17,15 @@ const WRITTEN = JSON.stringify({
   now: '체크포인트를 Kaggle로 옮기는 중',
   waiting: '',
   blocks: [
-    { kind: 'flow', title: '', steps: [{ label: '체크포인트 확인', state: 'done' }, { label: 'Kaggle로 이동', state: 'now' }, { label: '학습 재개', state: 'todo' }] },
+    {
+      kind: 'graph',
+      title: '',
+      nodes: [
+        { label: '확인', state: 'done', note: 'epoch 2', branches: [{ label: '끊김', state: 'failed', note: 'L4 2대', back: true }] },
+        { label: '이동', state: 'now', note: 'Kaggle', branches: [] },
+        { label: '재개', state: 'todo', note: '', branches: [] },
+      ],
+    },
     { kind: 'table', title: '세션', columns: ['세션', 'GPU', '상태'], rows: [{ cells: ['l4a', 'L4', '종료'], tone: 'bad', from: 2 }, { cells: ['l4c', 'T4', '대기'], tone: 'muted', from: 0 }] },
     { kind: 'bars', title: '실험 진행 상황', items: [{ label: 't384_lr1e4', value: 2, max: 10, note: 'AUC 0.871', tone: 'normal', from: 0 }] },
     { kind: 'metrics', title: '', items: [{ label: 'val AUC', value: '0.871', tone: 'good', from: 0 }, { label: '남은 epoch', value: '8', tone: 'normal', from: 0 }] },
@@ -68,10 +76,14 @@ describe('the progress dashboard', () => {
     expect(await ui.find({ type: 'Text', text: /Colab 학습 재개/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^체크포인트를 Kaggle로 옮기는 중$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /지금/ })).toBeUndefined()
-    // The flow of stages
-    expect(await ui.find({ type: 'Text', text: '✓ 체크포인트 확인' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '● Kaggle로 이동' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '○ 학습 재개' })).toBeDefined()
+    // The main path as boxes, and a failure that branched off and was retried
+    expect(await ui.find({ type: 'Text', text: '✓ 확인' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '● 이동' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '○ 재개' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '✗ 끊김' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '↺ L4 2대' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ *▼$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '─▶ ' })).toBeDefined()
     // A table, with how long ago each value was seen
     expect(await ui.find({ type: 'Text', text: /^세션 +GPU +상태 +확인$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^l4a +L4 +종료 +\d+초 전$/ })).toBeDefined()
@@ -132,6 +144,7 @@ describe('the progress dashboard', () => {
   })
 
   test('a subagent runs on its own row and leaves a step when it ends', async ($, on) => {
+    mock.clock(on)
     on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
     on('turn.complete', () => ({ text: '' }))
 
@@ -169,7 +182,7 @@ describe('helpers', () => {
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'flow', title: '', steps: [{ label: '확인', state: 'done' }] }], covers: 1, at: 0 },
+      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'graph', title: '', nodes: [{ label: '확인', state: 'done', note: '', branches: [] }] }], covers: 1, at: 0 },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',
@@ -184,7 +197,7 @@ describe('helpers', () => {
   test('the answer is read even around a code fence, and unknown log ids are dropped', () => {
     const written = parseSummary('여기 있습니다\n```json\n' + WRITTEN + '\n```', new Set([1]))
     expect(written?.now).toContain('Kaggle로')
-    expect(written?.blocks.map(block => block.kind)).toEqual(['flow', 'table', 'bars', 'metrics'])
+    expect(written?.blocks.map(block => block.kind)).toEqual(['graph', 'table', 'bars', 'metrics'])
     // A log id the model made up is dropped to 0.
     const table = written?.blocks[1]
     expect(table?.kind === 'table' ? table.rows[0]?.from : -1).toBe(0)

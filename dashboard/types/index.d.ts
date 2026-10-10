@@ -44,9 +44,18 @@ export type WaitingItem = {
 /** A color the small model gives a row or an item. */
 export type Tone = 'normal' | 'good' | 'warn' | 'bad' | 'muted'
 
+/** A node's state, drawn as its border and symbol. */
+export type NodeState = 'done' | 'now' | 'todo' | 'failed' | 'wait'
+
+/** A step that hangs under a stage: a failure, a retry, a wait, a side task. */
+export type GraphBranch = { label: string; state: NodeState; note: string; back: boolean }
+
+/** One stage of the work's main path, with what hangs under it. */
+export type GraphNode = { label: string; state: NodeState; note: string; branches: GraphBranch[] }
+
 /** `from` is the log entry a value was seen in, 0 for none: the pane shows how long ago. */
 export type SummaryBlock =
-  | { kind: 'flow'; title: string; steps: { label: string; state: 'done' | 'now' | 'todo' | 'failed' }[] }
+  | { kind: 'graph'; title: string; nodes: GraphNode[] }
   | { kind: 'table'; title: string; columns: string[]; rows: { cells: string[]; tone: Tone; from: number }[] }
   | { kind: 'bars'; title: string; items: { label: string; value: number; max: number; note: string; tone: Tone; from: number }[] }
   | { kind: 'metrics'; title: string; items: { label: string; value: string; tone: Tone; from: number }[] }

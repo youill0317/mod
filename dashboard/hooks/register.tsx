@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { LogEntry, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
+import type { GraphNode, LogEntry, NodeState, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -37,24 +37,26 @@ const SIGNAL_DESCRIPTION = [
 ].join(' ')
 
 const SYSTEM = [
-  '너는 Claude Code 작업의 진행 대시보드를 쓴다. 사용자가 전체 작업 과정을 한눈에 파악하고 통제할 수 있게 돕는 것이 목적이다.',
+  '너는 Claude Code 작업의 진행 대시보드를 설계한다. 사용자가 전체 작업 과정을 한눈에 파악하고 통제할 수 있게 돕는 것이 목적이다.',
   '결과물, 계획, 파일 내용은 쓰지 않는다. 작업이 어떻게 흘러왔고 지금 어디에 있는지만 보여 준다.',
   '실행 중인 것과 사용자를 기다리는 것은 화면 맨 위에 따로 나오므로 블록으로 만들지 않는다.',
-  '글보다 도식과 표로 보여 준다. 문장은 최소로 쓴다. 보면 아는 것을 글로 덧붙이지 않는다("지금", "현황" 같은 말, 열 이름을 되풀이하는 제목).',
+  '글이 아니라 도식으로 보여 준다. 가장 중요한 것은 graph 도식이고, 표와 막대와 숫자 상자는 비교할 대상이나 수치가 있을 때만 쓴다. 문장은 쓰지 않는다.',
   'JSON 하나만 출력한다. 형식:',
-  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일을 머리말 없이, 30자 이내", "waiting": "Claude가 답을 마치고 사용자의 답이나 결정을 기다리면 그 내용 25자 이내. 사용자를 기다리는 것 목록에 이미 있으면 빈 문자열", "blocks": [블록...]}',
+  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일, 30자 이내", "waiting": "Claude가 답을 마치고 사용자의 결정을 기다리면 25자 이내. 사용자를 기다리는 것 목록에 이미 있으면 빈 문자열", "blocks": [블록...]}',
   '블록 종류:',
-  '- {"kind": "flow", "title": "", "steps": [{"label": "8자 이내", "state": "done|now|todo|failed"}]}  작업의 큰 단계 흐름. 일어난 순서대로 지난 단계, 지금 단계, 다음 단계를 4~7개로. now 뒤에는 todo만 둔다. 거의 항상 첫 블록으로 둔다.',
-  '- {"kind": "table", "title": "표만으로 무엇인지 모를 때만 한 단어, 아니면 빈 문자열", "columns": ["한 단어 열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
-  '- {"kind": "bars", "title": "한 단어", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등). note에 value/max를 되풀이하지 않는다.',
-  '- {"kind": "metrics", "title": "", "items": [{"label": "한두 단어 명사", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  핵심 숫자 2~4개.',
-  '- {"kind": "list", "title": "한 단어", "items": [{"text": "30자 이내", "tone": "..."}]}  실패처럼 꼭 글이 필요한 것만, 최대 3줄.',
-  '블록 제목, 열 이름, 숫자 이름은 한 단어 명사로 쓴다. 예: 세션, 실험, 실패, 진행, 커밋. "막힌 것", "확인할 것", "~한 ~"처럼 서술어가 붙은 말은 절대 쓰지 않는다.',
-  '블록은 최대 5개. 작업에 맞는 것만 고르고 내용 없는 블록은 만들지 않는다.',
-  '지난번에 쓴 대시보드가 있으면 작업이 크게 바뀌지 않는 한 블록 종류와 순서를 그대로 유지한다.',
+  '- {"kind": "graph", "title": "", "nodes": [{"label": "단계", "state": "done|now|todo|failed|wait", "note": "", "branches": [{"label": "", "state": "...", "note": "", "back": false}]}]}',
+  '  작업의 주된 흐름을 상자와 화살표로 그린다. nodes는 일어난 순서대로 4~6개, 지난 단계와 지금 단계와 다음 단계. now 뒤에는 todo만 둔다. 항상 첫 블록으로 둔다.',
+  '  branches는 그 단계에서 갈라진 일이다: 실패(failed), 사용자 대기(wait), 따로 돈 서브 에이전트나 작업(done/now). 실패를 고치고 다시 해서 넘어갔으면 back을 true로. 단계마다 최대 2개.',
+  '  label은 한 단어 명사, 한글 4자 이내(예: 준비, 변환, 빌드, 배포, 학습). note는 그 단계의 핵심 수치나 대상, 8자 이내(예: 12쪽, 38/64, epoch 2), 없으면 빈 문자열.',
+  '- {"kind": "table", "title": "", "columns": ["열"], "rows": [{"cells": ["값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 파일)을 비교할 때만. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
+  '- {"kind": "bars", "title": "", "items": [{"label": "", "value": 숫자, "max": 숫자, "note": "", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등)이 있을 때만. note에 value/max를 되풀이하지 않는다.',
+  '- {"kind": "metrics", "title": "", "items": [{"label": "", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  꼭 봐야 할 숫자 2~4개가 있을 때만.',
+  '- {"kind": "list", "title": "", "items": [{"text": "20자 이내", "tone": "..."}]}  도식으로 나타낼 수 없는 것만, 최대 2줄. 거의 쓰지 않는다.',
+  '블록 제목은 기본으로 빈 문자열이다. 블록만 보고 무엇인지 알 수 없을 때만 한 단어 명사로 붙인다(예: 세션, 실험, 점수).',
+  '열 이름, 막대 이름, 숫자 이름도 한 단어 명사로 쓴다. "막힌 것", "확인할 것", "~한 ~"처럼 서술어가 붙은 말은 절대 쓰지 않는다. 보면 아는 말("지금", "현황")은 쓰지 않는다.',
+  '블록은 최대 4개. 내용 없는 블록은 만들지 않는다. 지난번 대시보드가 있으면 작업이 크게 바뀌지 않는 한 블록 종류와 순서를 유지한다.',
   'from은 그 값을 확인한 기록의 번호다. 바깥 상태(학습 epoch, 세션 상태 등)에는 꼭 넣고, 아니면 0으로 둔다.',
-  'tone은 normal, good(끝남), warn(주의), bad(실패, 막힘), muted(덜 중요) 중 하나.',
-  '쉬운 한국어로 쓴다. 명령어나 경로는 꼭 필요할 때만 짧게 쓴다.',
+  'tone은 normal, good(끝남), warn(주의), bad(실패), muted(덜 중요) 중 하나.',
 ].join('\n')
 
 // Module state: it starts over on a reload.
@@ -108,7 +110,8 @@ export const register: Register = (on, options) => {
       return { text: '대시보드를 닫았습니다.' }
     }
     await $.ui.open({ id: PANE, title: '작업 과정' })
-    await update($, now, () => Date.now())
+    const at = await $.clock.now()
+    await update($, now, () => at)
     $.clock.after(0, () => wake($, ask === 'refresh'))
     return { text: ask === 'refresh' ? '대시보드를 다시 정리합니다.' : '작업 과정 대시보드를 열었습니다.' }
   })
@@ -150,7 +153,7 @@ export const register: Register = (on, options) => {
 
       if (e.tool === 'AskUserQuestion') {
         const label = questionOf(input)
-        const item: WaitingItem = { id, kind: 'question', label, since: Date.now() }
+        const item: WaitingItem = { id, kind: 'question', label, since: await $.clock.now() }
         await update($, waiting, list => [...list, item])
         await record($, 'question', `사용자에게 질문: ${label}`)
         return await next(e)
@@ -176,7 +179,7 @@ export const register: Register = (on, options) => {
       const [id] = match
       const input = (e.tool_input ?? {}) as Record<string, unknown>
       const label = e.tool_name === 'Bash' ? shellLabel(input) : stepOf(e.tool_name, input)
-      const item: WaitingItem = { id, kind: 'permission', label, since: Date.now() }
+      const item: WaitingItem = { id, kind: 'permission', label, since: await $.clock.now() }
       await update($, waiting, list => [...list.filter(one => one.id !== id), item])
       await record($, 'permission', `권한 요청: ${label}`)
     }
@@ -187,7 +190,7 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     const agentId = started.agentId
     if (agentId !== undefined && e.workflow === undefined) {
-      const row: RunningItem = { id: agentId, kind: 'agent', label: `${e.subagentType}: ${e.description}`, startedAt: Date.now(), background: e.background, taskId: null, last: '' }
+      const row: RunningItem = { id: agentId, kind: 'agent', label: `${e.subagentType}: ${e.description}`, startedAt: await $.clock.now(), background: e.background, taskId: null, last: '' }
       await update($, running, list => [...list.filter(item => item.id !== agentId), row])
       await record($, 'agent', `서브 에이전트 시작 (${e.subagentType}): ${e.description}`)
     }
@@ -236,7 +239,7 @@ export const register: Register = (on, options) => {
     const waits = await read($, waiting)
     const written = await read($, summary)
     const said = await read($, phase)
-    const at = Math.max(await read($, now), Date.now())
+    const at = Math.max(await read($, now), await $.clock.now())
 
     const byId = new Map(entries.map(entry => [entry.id, entry]))
     const unwritten = entries.filter(entry => entry.id > (written?.covers ?? 0)).length
@@ -324,8 +327,8 @@ function drawBlock(BoxEl: unknown, TextEl: unknown, block: SummaryBlock, columns
     return entry === undefined ? '' : `${ageText(at - entry.at)} 전`
   }
   switch (block.kind) {
-    case 'flow':
-      return drawFlow(Box, Text, block.steps, columns)
+    case 'graph':
+      return drawGraph(Box, Text, block.nodes, columns)
     case 'table':
       return drawTable(Box, Text, block.columns, block.rows.map(row => ({ ...row, age: ago(row.from) })), columns)
     case 'bars':
@@ -337,29 +340,93 @@ function drawBlock(BoxEl: unknown, TextEl: unknown, block: SummaryBlock, columns
   }
 }
 
-// ✓ 데이터 준비 ─ ● 체크포인트 이동 ─ ○ 학습 재개, wrapped to the pane.
-function drawFlow(Box: Draw, Text: Draw, steps: readonly { label: string; state: 'done' | 'now' | 'todo' | 'failed' }[], columns: number): Node {
-  const look = {
-    done: { symbol: '✓', props: { color: 'success' } },
-    now: { symbol: '●', props: { color: 'suggestion', bold: true } },
-    todo: { symbol: '○', props: { dimColor: true } },
-    failed: { symbol: '✗', props: { color: 'error' } },
-  } as const
-  const lines: Node[][] = [[]]
+// How each state is drawn: the box's border and color, and the symbol before the label.
+const NODE_LOOK: Record<NodeState, { symbol: string; border: string; color: string | undefined; dim: boolean; bold: boolean }> = {
+  done: { symbol: '✓', border: 'round', color: 'success', dim: false, bold: false },
+  now: { symbol: '●', border: 'bold', color: 'suggestion', dim: false, bold: true },
+  todo: { symbol: '○', border: 'dashed', color: 'subtle', dim: true, bold: false },
+  failed: { symbol: '✗', border: 'round', color: 'error', dim: false, bold: false },
+  wait: { symbol: '◆', border: 'round', color: 'warning', dim: false, bold: false },
+}
+
+/** Columns a node box takes: its widest line, the padding and the border. */
+export function nodeWidth(node: { label: string; note: string; back?: boolean }): number {
+  return Math.max(width(`✓ ${node.label}`), width(`${node.back === true ? '↺ ' : ''}${node.note}`)) + 4
+}
+
+/**
+ * The main path as boxes joined by arrows, as many to a row as the pane holds,
+ * and under a box what branched off it: a failure, a retry, a wait.
+ *
+ *   ╭────────╮   ╭────────╮   ┏━━━━━━━━┓
+ *   │✓ 빌드  │─▶ │✓ 링크  │─▶ ┃● 최적화┃
+ *   │12쪽    │   ╰────────╯   ┃38/64   ┃
+ *   ╰────────╯                ┗━━━━━━━━┛
+ *       │
+ *       ▼
+ *   ╭────────╮
+ *   │✗ 경로  │
+ *   │↺ 3개   │
+ *   ╰────────╯
+ */
+function drawGraph(Box: Draw, Text: Draw, nodes: readonly GraphNode[], columns: number): Node {
+  const ARROW = '─▶ '
+  const box = (item: { label: string; state: NodeState; note: string }, back = false) => {
+    const look = NODE_LOOK[item.state]
+    const inner = nodeWidth({ ...item, back }) - 4
+    return h(
+      Box,
+      { flexDirection: 'column', borderStyle: look.border, borderColor: look.color, paddingX: 1, width: inner + 4 },
+      h(Text, { color: look.color === 'subtle' ? undefined : look.color, dimColor: look.dim, bold: look.bold }, truncate(`${look.symbol} ${item.label}`, inner)),
+      item.note !== '' || back ? h(Text, { dimColor: true }, truncate(`${back ? '↺ ' : ''}${item.note}`, inner)) : null,
+    )
+  }
+  // A column is a box with what branched under it; its arrow hangs on the box and
+  // stretches across any width a wider branch adds, so it always meets the next box.
+  const columnWidth = (node: GraphNode, last: boolean) =>
+    Math.max(nodeWidth(node) + (last ? 0 : 3), ...node.branches.map(branch => nodeWidth(branch) + (last ? 0 : 1)))
+  const column = (node: GraphNode, last: boolean) => {
+    const arrow = last ? '' : `${'─'.repeat(Math.max(1, columnWidth(node, false) - nodeWidth(node) - 2))}▶ `
+    const middle = ' '.repeat(Math.floor(nodeWidth(node) / 2) - 1)
+    return h(
+      Box,
+      { flexDirection: 'column', width: columnWidth(node, last) },
+      h(Box, { flexDirection: 'row' }, box(node), arrow === '' ? null : h(Box, { marginTop: 1 }, h(Text, { dimColor: true }, arrow))),
+      ...node.branches.map(branch =>
+        h(
+          Box,
+          { flexDirection: 'column' },
+          h(Text, { color: NODE_LOOK[branch.state].color, dimColor: branch.state === 'todo' }, `${middle}│`),
+          h(Text, { color: NODE_LOOK[branch.state].color, dimColor: branch.state === 'todo' }, `${middle}▼`),
+          box(branch, branch.back),
+        ),
+      ),
+    )
+  }
+  // Rows of columns that fit the pane; the next row continues the path.
+  const rows: GraphNode[][] = [[]]
   let used = 0
-  steps.forEach((step, i) => {
-    const text = truncate(`${look[step.state].symbol} ${step.label}`, columns)
-    const join = i === 0 ? '' : ' ─ '
-    if (used > 0 && used + width(join) + width(text) > columns) {
-      lines.push([])
+  nodes.forEach((node, i) => {
+    const need = columnWidth(node, i === nodes.length - 1)
+    if (used > 0 && used + need > columns - 2) {
+      rows.push([])
       used = 0
     }
-    const line = lines[lines.length - 1]!
-    if (used > 0) line.push(h(Text, { dimColor: true }, join))
-    line.push(h(Text, look[step.state].props, text))
-    used += (used > 0 ? width(join) : 0) + width(text)
+    rows[rows.length - 1]!.push(node)
+    used += need
   })
-  return h(Box, { flexDirection: 'column' }, ...lines.map(parts => h(Box, { flexDirection: 'row' }, ...parts)))
+  return h(
+    Box,
+    { flexDirection: 'column' },
+    ...rows.map((row, r) =>
+      h(
+        Box,
+        { flexDirection: 'row', marginTop: r === 0 ? 0 : 1 },
+        r === 0 ? null : h(Box, { marginTop: 1 }, h(Text, { dimColor: true }, '↳ ')),
+        ...row.map(node => column(node, node === nodes[nodes.length - 1])),
+      ),
+    ),
+  )
 }
 
 function drawTable(Box: Draw, Text: Draw, head: readonly string[], rows: readonly { cells: readonly string[]; tone: Tone; age: string }[], columns: number): Node {
@@ -413,10 +480,12 @@ function drawBars(Box: Draw, Text: Draw, items: readonly { label: string; value:
 }
 
 // Boxed key numbers, each as wide as its content, as many to a row as the pane holds.
+// When every number was seen at once, that time shows once under the boxes.
 function drawMetrics(Box: Draw, Text: Draw, items: readonly { label: string; value: string; tone: Tone; age: string }[], columns: number): Node {
-  const captions = items.map(item => (item.age === '' ? item.label : `${item.label} · ${item.age}`))
+  const shared = items.every(item => item.age === items[0]!.age) ? items[0]!.age : undefined
+  const captions = items.map(item => (shared !== undefined || item.age === '' ? item.label : `${item.label} · ${item.age}`))
   const content = Math.max(...items.map((item, i) => Math.max(width(item.value), width(captions[i]!))))
-  const tileWidth = Math.min(columns, Math.max(10, content + 4))
+  const tileWidth = Math.min(columns, Math.max(8, content + 4))
   const perRow = Math.max(1, Math.min(items.length, Math.floor((columns + 1) / (tileWidth + 1))))
   const rows: number[][] = []
   for (let i = 0; i < items.length; i += perRow) rows.push(items.slice(i, i + perRow).map((_, j) => i + j))
@@ -437,6 +506,7 @@ function drawMetrics(Box: Draw, Text: Draw, items: readonly { label: string; val
         ),
       ),
     ),
+    shared === undefined || shared === '' ? null : h(Text, { dimColor: true }, shared),
   )
 }
 
@@ -448,14 +518,14 @@ function trimNumber(value: number): string {
 // ── Recording and waking the model ──────────────────────────────────────────
 
 async function record($: EngineInterface, kind: LogEntry['kind'], text: string) {
-  const at = Date.now()
+  const at = await $.clock.now()
   await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(text, 300) }].slice(-MAX_LOG))
   if (URGENT.has(kind)) await schedule($, SOON_MS)
   else if (await paneShown($)) await schedule($, LATER_MS)
 }
 
 async function schedule($: EngineInterface, ms: number) {
-  const due = Date.now() + ms
+  const due = (await $.clock.now()) + ms
   if (timer !== undefined && timerAt <= due) return
   timer?.cancel()
   timerAt = due
@@ -482,7 +552,10 @@ async function paneShown($: EngineInterface): Promise<boolean> {
 
 async function tick($: EngineInterface) {
   const busyNow = (await read($, running)).length > 0 || (await read($, waiting)).length > 0
-  if (busyNow && (await paneShown($))) await update($, now, () => Date.now())
+  if (busyNow && (await paneShown($))) {
+    const at = await $.clock.now()
+    await update($, now, () => at)
+  }
 }
 
 async function summarize($: EngineInterface) {
@@ -497,12 +570,13 @@ async function summarize($: EngineInterface) {
     const newest = entries[entries.length - 1]?.id ?? 0
     if (newest === 0 || (previous !== null && previous.covers >= newest)) return
 
-    const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), Date.now())
+    const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), await $.clock.now())
     const text = await complete($, prompt)
     if (text === undefined) return
     const written = parseSummary(text, new Set(entries.map(entry => entry.id)))
     if (written === undefined) return
-    await update($, summary, () => ({ ...written, covers: newest, at: Date.now() }))
+    const at = await $.clock.now()
+    await update($, summary, () => ({ ...written, covers: newest, at }))
   } finally {
     busy = false
     if (again) {
@@ -529,7 +603,7 @@ async function complete($: EngineInterface, prompt: string): Promise<string | un
 async function startShell($: EngineInterface, id: string, input: Record<string, unknown>): Promise<number> {
   const label = shellLabel(input)
   const background = input.run_in_background === true
-  const startedAt = Date.now()
+  const startedAt = await $.clock.now()
   const item: RunningItem = { id, kind: 'shell', label, startedAt, background, taskId: null, last: '' }
   await update($, running, list => [...list, item])
   await record($, 'shell', `${background ? '백그라운드 셸 시작' : '셸 실행'}: ${label}`)
@@ -548,7 +622,7 @@ async function endShell($: EngineInterface, id: string, input: Record<string, un
   }
   await update($, running, list => list.filter(item => item.id !== id))
   const output = outputOf(result.stdout, result.stderr)
-  const took = ageText(Date.now() - startedAt)
+  const took = ageText((await $.clock.now()) - startedAt)
   await record($, failed ? 'shell-failed' : 'shell-done', `${failed ? '셸 실패' : '셸 끝남'} (${took}): ${label}${output === '' ? '' : ` → ${output}`}`)
 }
 
@@ -601,14 +675,23 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
   const title = str(block.title, 16).split(/\s+/)[0] ?? ''
   const from = (value: unknown) => (typeof value === 'number' && ids.has(value) ? value : 0)
   switch (block.kind) {
+    case 'graph':
     case 'flow': {
-      const states = ['done', 'now', 'todo', 'failed'] as const
-      const steps = list(block.steps)
+      const nodes = list(block.kind === 'flow' ? block.steps : block.nodes)
         .map(obj)
-        .map(step => ({ label: str(step.label, 18), state: states.find(state => state === step.state) ?? 'todo' }))
-        .filter(step => step.label !== '')
-        .slice(0, 8)
-      return steps.length === 0 ? undefined : { kind: 'flow', title, steps: inOrder(steps) }
+        .map(node => ({
+          label: str(node.label, 10),
+          state: stateOf(node.state),
+          note: str(node.note, 12),
+          branches: list(node.branches)
+            .map(obj)
+            .map(branch => ({ label: str(branch.label, 10), state: stateOf(branch.state), note: str(branch.note, 12), back: branch.back === true }))
+            .filter(branch => branch.label !== '')
+            .slice(0, 2),
+        }))
+        .filter(node => node.label !== '')
+        .slice(0, 7)
+      return nodes.length === 0 ? undefined : { kind: 'graph', title, nodes: inOrder(nodes) }
     }
     case 'table': {
       const columns = list(block.columns).map(column => str(column, 12)).filter(column => column !== '').slice(0, 5)
@@ -650,7 +733,7 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
 }
 
 /** A flow reads left to right: a step finished after the current one belongs before it. */
-export function inOrder<S extends { state: 'done' | 'now' | 'todo' | 'failed' }>(steps: readonly S[]): S[] {
+export function inOrder<S extends { state: NodeState }>(steps: readonly S[]): S[] {
   const now = steps.findIndex(step => step.state === 'now')
   if (now === -1) return [...steps]
   const before = steps.slice(0, now)
@@ -665,6 +748,8 @@ export function repeatsValue(note: string, value: number, max: number): boolean 
 }
 
 const TONES = ['normal', 'good', 'warn', 'bad', 'muted'] as const
+const STATES = ['done', 'now', 'todo', 'failed', 'wait'] as const
+const stateOf = (value: unknown): NodeState => STATES.find(state => state === value) ?? 'todo'
 const toneOf = (value: unknown): Tone => TONES.find(tone => tone === value) ?? 'normal'
 const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
 const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : Number(value) || 0)
