@@ -5,7 +5,7 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 
 // A real Haiku answer to a blog deploy (24 log entries over 95 minutes), replayed on the
 // mock clock and drawn end to end.
-test('a real Haiku answer to a blog deploy draws as a node diagram with branches, a bar and number boxes', async ($, on) => {
+test('a real Haiku answer to a blog deploy draws the top lines, then only diagrams', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('model.complete', () => ({ value: { isAnswered: true, text: ANSWER, usage: USAGE } }))
   on('classic.PermissionRequest', () => ({}))
@@ -76,12 +76,12 @@ test('a real Haiku answer to a blog deploy draws as a node diagram with branches
   finish()
   await held
 
-  // What waits and what runs, with the time each has taken
-  expect(lines).toEqual(expect.arrayContaining(['◆ Vercel에 프로덕션 배포 · 권한 요청', '  3분', '↻ 남은 이미지 26개 최적화', '  24분']))
+  // The top: the work now, what waits and what runs, with the time each has taken
+  expect(lines.slice(0, 5)).toEqual(['● 남은 이미지 최적화 후 배포 준비', '◆ Vercel에 프로덕션 배포 · 권한 요청', '  3분', '↻ 남은 이미지 26개 최적화', '  24분'])
   // The main path in order, and what branched off it
-  expect(lines.filter(line => /^[✓●○✗◆] /.test(line) && !/Vercel/.test(line))).toEqual(['✓ 준비', '✓ 변환', '✓ 조사', '✓ 빌드', '✗ 누락', '✓ 검사', '● 최적화', '○ 배포', '◆ 승인'])
+  expect(lines.slice(5).filter(line => /^[✓●○✗◆] /.test(line))).toEqual(['✓ 준비', '✓ 변환', '✓ 조사', '✓ 빌드', '✗ 누락', '✓ 검사', '● 최적화', '○ 배포', '◆ 승인'])
   expect(lines).toContain('↺ 이미지 3개')
-  // The bar, and number boxes all seen at once, so their time shows once
-  expect(lines.find(line => /^ 38\/64/.test(line))).toBe(' 38/64  남은 26개  40분 전')
-  expect(lines).toEqual(expect.arrayContaining(['점수', '92', '100', '98', '8분 전', '2분 전 정리']))
+  // The bar with when its value was seen; the number boxes the answer also held are not drawn
+  expect(lines.find(line => /^ 38\/64/.test(line))).toBe(' 38/64  40분 전')
+  expect(lines.some(line => /점수|정리/.test(line))).toBe(false)
 })

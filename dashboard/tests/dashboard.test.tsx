@@ -1,42 +1,39 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { fitOf, graphRows, inOrder, parseSummary, promptFor, repeatsValue, roomFor, spans, stableKey } from '../hooks/register'
+import { fitBlocks, fitOf, graphRows, inOrder, parseSummary, promptFor, spans, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
   component: 'Pane',
   requestId: 'dashboard',
-  props: { title: '작업 과정', isFocused: false, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  props: { title: '작업 현황', isFocused: false, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
 } as const
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const DONE = { result: { stdout: 'epoch 3/10 loss=0.51', stderr: '', interrupted: false } }
 
 const WRITTEN = JSON.stringify({
-  title: 'Colab 학습 재개',
   now: '체크포인트를 Kaggle로 옮기는 중',
-  waiting: '',
   blocks: [
     {
       kind: 'graph',
-      title: '',
       nodes: [
         { label: '확인', state: 'done', note: 'epoch 2', from: 1, branches: [{ label: '끊김', state: 'failed', note: 'L4 2대', back: true }] },
         { label: '이동', state: 'now', note: 'Kaggle', from: 2, branches: [] },
         { label: '재개', state: 'todo', note: '', branches: [] },
       ],
     },
-    { kind: 'table', title: '세션', columns: ['세션', 'GPU', '상태'], rows: [{ cells: ['l4a', 'L4', '종료'], tone: 'bad', from: 2 }, { cells: ['l4c', 'T4', '대기'], tone: 'muted', from: 0 }] },
-    { kind: 'bars', title: '실험 진행 상황', items: [{ label: 't384_lr1e4', value: 2, max: 10, note: 'AUC 0.871', tone: 'normal', from: 0 }] },
-    { kind: 'metrics', title: '', items: [{ label: 'val AUC', value: '0.871', tone: 'good', from: 0 }, { label: '남은 epoch', value: '8', tone: 'normal', from: 0 }] },
-    { kind: 'list', title: '실패', items: [] },
-    { kind: 'chart', title: '없는 종류' },
-    { kind: 'time', title: '' },
+    { kind: 'bars', items: [{ label: 't384_lr1e4', value: 2, max: 10, tone: 'normal', from: 1 }] },
+    { kind: 'time' },
+    // Kinds the dashboard does not draw any more, and one it never knew.
+    { kind: 'table', columns: ['세션'], rows: [{ cells: ['l4a'] }] },
+    { kind: 'metrics', items: [{ label: 'val AUC', value: '0.871' }] },
+    { kind: 'chart' },
   ],
 })
 
 describe('the progress dashboard', () => {
-  test('a running shell shows under what runs, then joins the recent log', async ($, on) => {
+  test('a running shell shows at the top while it runs', async ($, on) => {
     const clock = mock.clock(on)
     let finish: () => void = () => undefined
     on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (finish = () => resolve(DONE))))
@@ -53,11 +50,10 @@ describe('the progress dashboard', () => {
     await call
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /^▶ / })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /셸 끝남 .*학습 재개/ })).toBeDefined()
     await ui.unmount()
   })
 
-  test('a phase signal wakes the model, and the blocks it chose are drawn as a flow, a table, bars and numbers', async ($, on) => {
+  test('a phase signal wakes the model, and below the top lines only diagrams are drawn', async ($, on) => {
     const clock = mock.clock(on)
     const asked: string[] = []
     on('model.complete', ($, e) => {
@@ -74,37 +70,38 @@ describe('the progress dashboard', () => {
     expect(asked[0]).toContain('Claude가 알린 지금 단계: 학습 재개')
 
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /Colab 학습 재개/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^체크포인트를 Kaggle로 옮기는 중$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /지금/ })).toBeUndefined()
-    // The main path as boxes, and a failure that branched off and was retried
-    expect(await ui.find({ type: 'Text', text: '✓ 확인' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '● 이동' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '○ 재개' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '✗ 끊김' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '↺ L4 2대' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ *▼$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '─▶ ' })).toBeDefined()
-    // A table, with how long ago each value was seen
-    expect(await ui.find({ type: 'Text', text: /^세션 +GPU +상태 +확인$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^l4a +L4 +종료 +\d+초 전$/ })).toBeDefined()
-    // A progress bar and the key numbers
-    expect(await ui.find({ type: 'Text', text: /^█+$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^실험$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /진행 상황/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /2\/10 {2}AUC 0\.871/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '0.871' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '남은 epoch' })).toBeDefined()
-    // The stages on one time axis, the current one counting up.
-    expect(await ui.find({ type: 'Text', text: /^확인 {2}$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: / 2초째$/ })).toBeDefined()
-    // An empty block, an unknown kind, and the live lines with nothing to show stay out.
-    expect(await ui.find({ type: 'Text', text: /^실패$|없는 종류/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /^[◆▶◎↻] / })).toBeUndefined()
+    const texts = (await ui.findAll({ type: 'Text' })).map(node => node.text)
+    // The work now, as the first line, led by its symbol
+    expect(texts[0]).toBe('● 체크포인트를 Kaggle로 옮기는 중')
+    // The stages as boxes, and a failure that branched off and was retried
+    expect(texts).toEqual(expect.arrayContaining(['✓ 확인', '● 이동', '○ 재개', '✗ 끊김', '↺ L4 2대', '─▶ ']))
+    expect(texts.some(text => /^ *▼$/.test(text))).toBe(true)
+    // A bar with when its value was seen, and the stages on a time axis
+    expect(texts.some(text => /^ 2\/10 {2}\d+초 전$/.test(text))).toBe(true)
+    expect(texts).toContain('확인  ')
+    expect(texts.some(text => / 2초째$/.test(text))).toBe(true)
+    // No title, no footer, no table, no number boxes
+    expect(texts.some(text => /작업 현황|정리|세션|val AUC|l4a/.test(text))).toBe(false)
     await ui.unmount()
   })
 
-  test('a question to the person shows under what waits on them', async ($, on) => {
+  test('what Claude says the person must decide waits at the top until they write', async ($, on) => {
+    mock.clock(on)
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '배포 전 확인', note: '프로덕션에 배포할지 결정' })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: '◆ 프로덕션에 배포할지 결정' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '● 배포 전 확인' })).toBeDefined()
+    await ui.unmount()
+
+    await $.prompt.submit({ text: '배포해', origin: { kind: 'composer' }, wait: false } as never)
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
+    await after.unmount()
+  })
+
+  test('a question to the person shows at the top while it waits', async ($, on) => {
     const clock = mock.clock(on)
     let answer: () => void = () => undefined
     on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(resolve => (answer = () => resolve({ result: { answers: {} } }))))
@@ -118,7 +115,7 @@ describe('the progress dashboard', () => {
     answer()
     await call
     const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await after.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문$/ })).toBeUndefined()
+    expect(await after.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
     await after.unmount()
   })
 
@@ -147,10 +144,11 @@ describe('the progress dashboard', () => {
     await call
   })
 
-  test('a subagent runs on its own row and leaves a step when it ends', async ($, on) => {
+  test('a subagent shows its role and its latest step until it ends', async ($, on) => {
     mock.clock(on)
     on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
     on('turn.complete', () => ({ text: '' }))
+    on('tool.call', { tool: 'Grep' }, () => ({ result: '' }))
 
     await $.agent.spawn({
       tool_use_id: 't1',
@@ -162,32 +160,32 @@ describe('the progress dashboard', () => {
       background: true,
       fork: false,
     } as never)
+    await $.tool.call({ tool: 'Grep', pattern: 'run_gpu', agentId: 'a1' } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /^◎ general-purpose: GPU 패스 추가/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◎ GPU 패스 추가$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  └ Grep: run_gpu' })).toBeDefined()
     await ui.unmount()
 
     await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' } as never)
     const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await after.find({ type: 'Text', text: /^◎ / })).toBeUndefined()
-    expect(await after.find({ type: 'Text', text: /서브 에이전트 끝남: general-purpose: GPU 패스 추가/ })).toBeDefined()
     await after.unmount()
   })
 
-  test('the model is told the pane size, and lays out again for another size class', async ($, on) => {
+  test('the model is told the pane size, and draws again for another size class', async ($, on) => {
     const clock = mock.clock(on)
     const asked: string[] = []
     on('model.complete', ($, e) => {
       asked.push(e.prompt)
       return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
     })
-    on('tool.call', { tool: 'Bash' }, () => DONE)
 
     const wide = await $.ui.mount({ ...PANE, surface: 'terminal' })
     await clock.advance(0)
     await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
     await clock.advance(2_000)
     expect(asked).toHaveLength(1)
-    expect(asked[0]).toContain('창: 가로 70칸, 세로 60줄. graph는 상자 8개까지(한 줄에 4개씩)')
+    expect(asked[0]).toContain('창: 가로 70칸, 세로 60줄. 단계 상자는 한 줄에 4개쯤 들어간다.')
     await wide.unmount()
 
     // A few cells narrower stays in the same class: the summary stands.
@@ -196,12 +194,16 @@ describe('the progress dashboard', () => {
     expect(asked).toHaveLength(1)
     await near.unmount()
 
-    // A narrow, short pane is another class: the same log is laid out again for it.
+    // A narrow, short pane is another class: the same log is drawn again for it,
+    // and the diagrams that do not fit are left out from the end.
     const narrow = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 34, scroll: { offset: 0, bodyRows: 14 } } })
     await clock.advance(2_000)
     expect(asked).toHaveLength(2)
-    expect(asked[1]).toContain('창: 가로 34칸, 세로 14줄. graph는 상자 4개까지(한 줄에 2개씩), 갈래는 넣지 않는다')
+    expect(asked[1]).toContain('창: 가로 34칸, 세로 14줄. 단계 상자는 한 줄에 2개쯤 들어간다.')
     expect(asked[1]).toContain('창 크기가 지난번과 다르다')
+    const texts = (await narrow.findAll({ type: 'Text' })).map(node => node.text)
+    expect(texts).toContain('● 이동')
+    expect(texts.some(text => /█/.test(text))).toBe(false)
     await narrow.unmount()
   })
 
@@ -212,13 +214,13 @@ describe('the progress dashboard', () => {
 })
 
 describe('helpers', () => {
-  test('the model gets the log, what runs, what waits and what it wrote before', () => {
+  test('the model gets the log, what runs, what waits and what it drew before', () => {
     const prompt = promptFor(
       [
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'graph', title: '', nodes: [{ label: '확인', state: 'done', note: '', branches: [], from: 1 }] }], covers: 1, at: 0, fit: '4L' },
+      { now: 'n', blocks: [{ kind: 'graph', nodes: [{ label: '확인', state: 'done', note: '', branches: [], from: 1 }] }], covers: 1, at: 0, fit: '4/2' },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',
@@ -227,17 +229,29 @@ describe('helpers', () => {
     expect(prompt).toContain('#1 2분 전 셸 끝남')
     expect(prompt).toContain('#2 1분 전 (새) 학습 재개')
     expect(prompt).toContain('셸 학습 (2분째)')
-    expect(prompt).toContain('지난번에 쓴 대시보드')
+    expect(prompt).toContain('지난번 도식')
   })
 
-  test('the room left for the blocks takes off the lines above and below them', () => {
-    const run = { id: 'x', kind: 'agent' as const, label: '조사', startedAt: 0, background: false, taskId: null, last: 'Grep' }
-    // 32 rows for the blocks: a row of six boxes (4), two branches (12), 15 left and 1 between.
-    expect(roomFor({ columns: 100, rows: 40 }, [run], [])).toBe('창: 가로 100칸, 세로 40줄. graph는 상자 6개까지(한 줄에 6개씩), 갈래는 모두 합쳐 2개까지. graph 말고 다른 블록은 모두 합쳐 15줄 안에 넣는다.')
-    // A narrow, short pane: four boxes in two rows and no room for anything else.
-    expect(roomFor({ columns: 40, rows: 14 }, [], [])).toBe('창: 가로 40칸, 세로 14줄. graph는 상자 4개까지(한 줄에 2개씩), 갈래는 넣지 않는다. graph 말고 다른 블록은 넣지 않는다.')
-    expect(fitOf({ columns: 100, rows: 40 })).toBe(fitOf({ columns: 98, rows: 41 }))
-    expect(fitOf({ columns: 100, rows: 40 })).not.toBe(fitOf({ columns: 100, rows: 20 }))
+  test('the answer is read around a code fence; only diagrams it knows are kept, unknown log ids dropped', () => {
+    const written = parseSummary('여기 있습니다\n```json\n' + WRITTEN + '\n```', new Set([1]))
+    expect(written?.now).toContain('Kaggle로')
+    // The time block needs two stages with a known start: with id 2 unknown, it is dropped.
+    expect(written?.blocks.map(block => block.kind)).toEqual(['graph', 'bars'])
+    const both = parseSummary(WRITTEN, new Set([1, 2]))
+    expect(both?.blocks.map(block => block.kind)).toEqual(['graph', 'bars', 'time'])
+    expect(parseSummary('모르겠습니다', new Set())).toBeUndefined()
+  })
+
+  test('the diagrams that fit are kept in order; the first always is', () => {
+    expect(fitBlocks([{ block: 'graph', rows: 9 }, { block: 'bars', rows: 2 }, { block: 'time', rows: 4 }], 13)).toEqual(['graph', 'bars'])
+    expect(fitBlocks([{ block: 'graph', rows: 20 }, { block: 'bars', rows: 2 }], 10)).toEqual(['graph'])
+    expect(fitBlocks([{ block: 'time', rows: 0 }, { block: 'bars', rows: 2 }], 10)).toEqual(['bars'])
+  })
+
+  test('the size class changes with the boxes across or a band of rows', () => {
+    expect(fitOf({ columns: 100, rows: 40 })).toBe(fitOf({ columns: 98, rows: 44 }))
+    expect(fitOf({ columns: 100, rows: 40 })).not.toBe(fitOf({ columns: 100, rows: 18 }))
+    expect(fitOf({ columns: 100, rows: 40 })).not.toBe(fitOf({ columns: 40, rows: 40 }))
     expect(fitOf(null)).toBe('')
   })
 
@@ -261,21 +275,9 @@ describe('helpers', () => {
     // Seven fit on the first row and one is left: four and four instead.
     expect(graphRows([13, 13, 13, 13, 13, 13, 13, 10], 98)).toEqual([[0, 1, 2, 3], [4, 5, 6, 7]])
     expect(graphRows([13, 13, 13], 98)).toEqual([[0, 1, 2]])
-    // Spread evenly the first row would not fit: the greedy rows stand.
-    expect(graphRows([40, 40, 10, 10, 10], 90)).toEqual([[0, 1, 2], [3, 4]])
   })
 
-  test('the answer is read even around a code fence, and unknown log ids are dropped', () => {
-    const written = parseSummary('여기 있습니다\n```json\n' + WRITTEN + '\n```', new Set([1]))
-    expect(written?.now).toContain('Kaggle로')
-    expect(written?.blocks.map(block => block.kind)).toEqual(['graph', 'table', 'bars', 'metrics'])
-    // A log id the model made up is dropped to 0.
-    const table = written?.blocks[1]
-    expect(table?.kind === 'table' ? table.rows[0]?.from : -1).toBe(0)
-    expect(parseSummary('모르겠습니다', new Set())).toBeUndefined()
-  })
-
-  test('a flow reads in order, and a bar note does not repeat its value', () => {
+  test('a flow reads in order', () => {
     const steps = inOrder([
       { label: '빌드', state: 'done' },
       { label: '이미지', state: 'now' },
@@ -283,8 +285,6 @@ describe('helpers', () => {
       { label: '배포', state: 'todo' },
     ] as const)
     expect(steps.map(step => step.label)).toEqual(['빌드', '측정', '이미지', '배포'])
-    expect(repeatsValue('38/64장', 38, 64)).toBe(true)
-    expect(repeatsValue('12.1MB → 4.3MB', 38, 64)).toBe(false)
   })
 
   test('two spellings of one input compare equal', () => {
