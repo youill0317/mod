@@ -1,14 +1,14 @@
 {
   "name": "dashboard",
   "version": "0.2.0",
-  "description": "A pane that shows how the work is going (what runs, what waits on you, what happened while you were away), written by a small model on each change: /dashboard.",
+  "description": "A pane that shows the session's work: symbol lines for what runs and waits on you, then only diagrams of the stages, progress and time, drawn to the pane's size: /dashboard.",
   "author": { "name": "youill0317" },
   "types": "./types/index.d.ts",
   "userConfig": {
     "model": {
       "type": "string",
       "title": "Dashboard model",
-      "description": "Model woken on each change to rewrite the dashboard.",
+      "description": "Model woken on each change to choose the dashboard's diagrams.",
       "default": "haiku",
       "options": ["haiku", "sonnet"]
     }

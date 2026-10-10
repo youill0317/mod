@@ -901,7 +901,7 @@ export function ageText(ms: number): string {
   if (seconds < 60) return `${seconds}초`
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}분`
-  return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
+  return minutes % 60 === 0 ? `${minutes / 60}시간` : `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
 }
 
 // Terminal columns: Hangul, CJK and full-width forms take two.

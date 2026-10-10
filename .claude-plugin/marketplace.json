@@ -13,7 +13,7 @@
     {
       "name": "dashboard",
       "source": "./dashboard",
-      "description": "A pane that shows how the work is going (what runs, what waits on you, what happened while you were away), written by a small model on each change: /dashboard."
+      "description": "A pane that shows the session's work: symbol lines for what runs and waits on you, then only diagrams of the stages, progress and time, drawn to the pane's size: /dashboard."
     }
   ]
 }
