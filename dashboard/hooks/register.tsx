@@ -42,11 +42,11 @@ const SYSTEM = [
   '실행 중인 것과 사용자를 기다리는 것은 화면 맨 위에 따로 나오므로 블록으로 만들지 않는다.',
   '글보다 도식과 표로 보여 준다. 문장은 최소로 쓴다. 보면 아는 것을 글로 덧붙이지 않는다("지금", "현황" 같은 말, 열 이름을 되풀이하는 제목).',
   'JSON 하나만 출력한다. 형식:',
-  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일을 머리말 없이, 30자 이내", "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 25자 이내, 아니면 빈 문자열", "blocks": [블록...]}',
+  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일을 머리말 없이, 30자 이내", "waiting": "Claude가 답을 마치고 사용자의 답이나 결정을 기다리면 그 내용 25자 이내. 사용자를 기다리는 것 목록에 이미 있으면 빈 문자열", "blocks": [블록...]}',
   '블록 종류:',
-  '- {"kind": "flow", "title": "", "steps": [{"label": "8자 이내", "state": "done|now|todo|failed"}]}  작업의 큰 단계 흐름. 지난 단계, 지금 단계, 다음 단계를 4~7개로. 거의 항상 첫 블록으로 둔다.',
+  '- {"kind": "flow", "title": "", "steps": [{"label": "8자 이내", "state": "done|now|todo|failed"}]}  작업의 큰 단계 흐름. 일어난 순서대로 지난 단계, 지금 단계, 다음 단계를 4~7개로. now 뒤에는 todo만 둔다. 거의 항상 첫 블록으로 둔다.',
   '- {"kind": "table", "title": "표만으로 무엇인지 모를 때만 한 단어, 아니면 빈 문자열", "columns": ["한 단어 열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
-  '- {"kind": "bars", "title": "한 단어", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등).',
+  '- {"kind": "bars", "title": "한 단어", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등). note에 value/max를 되풀이하지 않는다.',
   '- {"kind": "metrics", "title": "", "items": [{"label": "한두 단어 명사", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  핵심 숫자 2~4개.',
   '- {"kind": "list", "title": "한 단어", "items": [{"text": "30자 이내", "tone": "..."}]}  실패처럼 꼭 글이 필요한 것만, 최대 3줄.',
   '블록 제목, 열 이름, 숫자 이름은 한 단어 명사로 쓴다. 예: 세션, 실험, 실패, 진행, 커밋. "막힌 것", "확인할 것", "~한 ~"처럼 서술어가 붙은 말은 절대 쓰지 않는다.',
@@ -76,19 +76,24 @@ export const register: Register = (on, options) => {
       description: '작업 과정 대시보드를 옆에 엽니다',
       argumentHint: '[refresh | close]',
     })
-    await $.tool.register({
-      name: SIGNAL,
-      description: SIGNAL_DESCRIPTION,
-      inputSchema: {
-        type: 'object',
-        required: ['phase'],
-        properties: {
-          phase: { type: 'string', description: 'The phase now, one short line.' },
-          note: { type: 'string', description: 'Optional: what is blocked or what the person must decide.' },
+    // A session with no tools (`--tools ""`) refuses the signal; the dashboard works without it.
+    try {
+      await $.tool.register({
+        name: SIGNAL,
+        description: SIGNAL_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          required: ['phase'],
+          properties: {
+            phase: { type: 'string', description: 'The phase now, one short line.' },
+            note: { type: 'string', description: 'Optional: what is blocked or what the person must decide.' },
+          },
         },
-      },
-      isDeferred: false,
-    })
+        isDeferred: false,
+      })
+    } catch {
+      // No signal tool in this session.
+    }
     // A reload loses the calls the old module was holding: they are no longer tracked.
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
     await update($, waiting, () => [])
@@ -169,7 +174,8 @@ export const register: Register = (on, options) => {
     const match = same.find(([, call]) => call.key === key) ?? (same.length === 1 ? same[0] : undefined)
     if (match !== undefined) {
       const [id] = match
-      const label = stepOf(e.tool_name, (e.tool_input ?? {}) as Record<string, unknown>)
+      const input = (e.tool_input ?? {}) as Record<string, unknown>
+      const label = e.tool_name === 'Bash' ? shellLabel(input) : stepOf(e.tool_name, input)
       const item: WaitingItem = { id, kind: 'permission', label, since: Date.now() }
       await update($, waiting, list => [...list.filter(one => one.id !== id), item])
       await record($, 'permission', `권한 요청: ${label}`)
@@ -244,19 +250,21 @@ export const register: Register = (on, options) => {
         : recent.length === 0
           ? []
           : [{ kind: 'table', title: '', columns: ['기록'], rows: recent.map(entry => ({ cells: [entry.text], tone: 'normal' as const, from: entry.id })) }]
-    const waitNote = written?.waiting ?? ''
+    // What the mod already lists as waiting is not repeated from the model's note.
+    const waitNote = waits.length > 0 ? '' : written?.waiting ?? ''
 
     // What waits on the person and what runs, each line led by its symbol.
     const live = [
       ...waits.map(item => ({
         symbol: WAITING,
         color: 'warning',
-        text: `${item.label} · ${item.kind === 'question' ? '질문' : '권한 요청'} ${ageText(at - item.since)}째`,
-        age: '',
+        text: `${item.label} · ${item.kind === 'question' ? '질문' : '권한 요청'}`,
+        age: `  ${ageText(at - item.since)}`,
         last: '',
       })),
       ...(waitNote === '' ? [] : [{ symbol: WAITING, color: 'warning', text: waitNote, age: '', last: '' }]),
-      ...runs.map(item => ({
+      // A call waiting on the person's permission is not running yet: it shows once, as waiting.
+      ...runs.filter(item => !waits.some(wait => wait.id === item.id)).map(item => ({
         symbol: item.kind === 'agent' ? AGENT : item.background ? BACKGROUND : SHELL,
         color: 'suggestion',
         text: item.label,
@@ -404,12 +412,14 @@ function drawBars(Box: Draw, Text: Draw, items: readonly { label: string; value:
   )
 }
 
-// Boxed key numbers side by side, two to a row when the pane is narrow.
+// Boxed key numbers, each as wide as its content, as many to a row as the pane holds.
 function drawMetrics(Box: Draw, Text: Draw, items: readonly { label: string; value: string; tone: Tone; age: string }[], columns: number): Node {
-  const perRow = items.length <= 2 || Math.floor((columns - (items.length - 1)) / items.length) >= 14 ? items.length : 2
-  const tileWidth = Math.max(10, Math.floor((columns - (perRow - 1)) / perRow))
-  const rows: (typeof items)[] = []
-  for (let i = 0; i < items.length; i += perRow) rows.push(items.slice(i, i + perRow))
+  const captions = items.map(item => (item.age === '' ? item.label : `${item.label} · ${item.age}`))
+  const content = Math.max(...items.map((item, i) => Math.max(width(item.value), width(captions[i]!))))
+  const tileWidth = Math.min(columns, Math.max(10, content + 4))
+  const perRow = Math.max(1, Math.min(items.length, Math.floor((columns + 1) / (tileWidth + 1))))
+  const rows: number[][] = []
+  for (let i = 0; i < items.length; i += perRow) rows.push(items.slice(i, i + perRow).map((_, j) => i + j))
   return h(
     Box,
     { flexDirection: 'column' },
@@ -417,12 +427,12 @@ function drawMetrics(Box: Draw, Text: Draw, items: readonly { label: string; val
       h(
         Box,
         { flexDirection: 'row', gap: 1 },
-        ...row.map(item =>
+        ...row.map(i =>
           h(
             Box,
             { flexDirection: 'column', borderStyle: 'round', borderColor: 'subtle', width: tileWidth, paddingX: 1 },
-            h(Text, { bold: true, color: TONE_COLOR[item.tone] }, truncate(item.value, tileWidth - 4)),
-            h(Text, { dimColor: true }, truncate(item.age === '' ? item.label : `${item.label} · ${item.age}`, tileWidth - 4)),
+            h(Text, { bold: true, color: TONE_COLOR[items[i]!.tone] }, truncate(items[i]!.value, tileWidth - 4)),
+            h(Text, { dimColor: true }, truncate(captions[i]!, tileWidth - 4)),
           ),
         ),
       ),
@@ -598,7 +608,7 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
         .map(step => ({ label: str(step.label, 18), state: states.find(state => state === step.state) ?? 'todo' }))
         .filter(step => step.label !== '')
         .slice(0, 8)
-      return steps.length === 0 ? undefined : { kind: 'flow', title, steps }
+      return steps.length === 0 ? undefined : { kind: 'flow', title, steps: inOrder(steps) }
     }
     case 'table': {
       const columns = list(block.columns).map(column => str(column, 12)).filter(column => column !== '').slice(0, 5)
@@ -614,6 +624,7 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
         .map(obj)
         .map(item => ({ label: str(item.label, 14), value: num(item.value), max: num(item.max), note: str(item.note, 14), tone: toneOf(item.tone), from: from(item.from) }))
         .filter(item => item.label !== '' && item.max > 0)
+        .map(item => ({ ...item, note: repeatsValue(item.note, item.value, item.max) ? '' : item.note }))
         .slice(0, 6)
       return items.length === 0 ? undefined : { kind: 'bars', title, items }
     }
@@ -636,6 +647,21 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
     default:
       return undefined
   }
+}
+
+/** A flow reads left to right: a step finished after the current one belongs before it. */
+export function inOrder<S extends { state: 'done' | 'now' | 'todo' | 'failed' }>(steps: readonly S[]): S[] {
+  const now = steps.findIndex(step => step.state === 'now')
+  if (now === -1) return [...steps]
+  const before = steps.slice(0, now)
+  const after = steps.slice(now + 1)
+  const finished = after.filter(step => step.state === 'done' || step.state === 'failed')
+  return [...before, ...finished, steps[now]!, ...after.filter(step => !finished.includes(step))]
+}
+
+/** Whether a bar's note only says again what its value shows (`38/64장` beside 38/64). */
+export function repeatsValue(note: string, value: number, max: number): boolean {
+  return note.replace(/\s+/g, '').includes(`${value}/${max}`)
 }
 
 const TONES = ['normal', 'good', 'warn', 'bad', 'muted'] as const

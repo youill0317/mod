@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { parseSummary, promptFor, stableKey } from '../hooks/register'
+import { inOrder, parseSummary, promptFor, repeatsValue, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
@@ -96,13 +96,13 @@ describe('the progress dashboard', () => {
     const call = $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: '어느 체크포인트로 이어갈까요?', header: 'Resume', options: [], multiSelect: false }] } as never)
     await clock.advance(0)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문$/ })).toBeDefined()
     await ui.unmount()
 
     answer()
     await call
     const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await after.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문/ })).toBeUndefined()
+    expect(await after.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문$/ })).toBeUndefined()
     await after.unmount()
   })
 
@@ -118,7 +118,9 @@ describe('the progress dashboard', () => {
     await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기' } })
 
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /^◆ 셸: Kaggle 데이터셋 만들기 · 권한 요청/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◆ Kaggle 데이터셋 만들기 · 권한 요청$/ })).toBeDefined()
+    // The same call is not also listed as running while it waits.
+    expect(await ui.find({ type: 'Text', text: /^▶ / })).toBeUndefined()
     await ui.unmount()
 
     await $.prompt.submit({ text: '허용했어', origin: { kind: 'composer' }, wait: false } as never)
@@ -187,6 +189,18 @@ describe('helpers', () => {
     const table = written?.blocks[1]
     expect(table?.kind === 'table' ? table.rows[0]?.from : -1).toBe(0)
     expect(parseSummary('모르겠습니다', new Set())).toBeUndefined()
+  })
+
+  test('a flow reads in order, and a bar note does not repeat its value', () => {
+    const steps = inOrder([
+      { label: '빌드', state: 'done' },
+      { label: '이미지', state: 'now' },
+      { label: '측정', state: 'done' },
+      { label: '배포', state: 'todo' },
+    ] as const)
+    expect(steps.map(step => step.label)).toEqual(['빌드', '측정', '이미지', '배포'])
+    expect(repeatsValue('38/64장', 38, 64)).toBe(true)
+    expect(repeatsValue('12.1MB → 4.3MB', 38, 64)).toBe(false)
   })
 
   test('two spellings of one input compare equal', () => {
