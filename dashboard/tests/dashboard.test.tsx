@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { fitBlocks, fitOf, graphRows, inOrder, parseSummary, promptFor, spans, stableKey } from '../hooks/register'
+import { fitBlocks, fitGraph, fitOf, graphRows, inOrder, parseSummary, promptFor, spans, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
@@ -195,7 +195,7 @@ describe('the progress dashboard', () => {
     await near.unmount()
 
     // A narrow, short pane is another class: the same log is drawn again for it,
-    // and the diagrams that do not fit are left out from the end.
+    // and what does not fit is left out.
     const narrow = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 34, scroll: { offset: 0, bodyRows: 14 } } })
     await clock.advance(2_000)
     expect(asked).toHaveLength(2)
@@ -203,7 +203,8 @@ describe('the progress dashboard', () => {
     expect(asked[1]).toContain('창 크기가 지난번과 다르다')
     const texts = (await narrow.findAll({ type: 'Text' })).map(node => node.text)
     expect(texts).toContain('● 이동')
-    expect(texts.some(text => /█/.test(text))).toBe(false)
+    // The branch does not fit the short pane: the stages are drawn without it.
+    expect(texts).not.toContain('✗ 끊김')
     await narrow.unmount()
   })
 
@@ -246,6 +247,28 @@ describe('helpers', () => {
     expect(fitBlocks([{ block: 'graph', rows: 9 }, { block: 'bars', rows: 2 }, { block: 'time', rows: 4 }], 13)).toEqual(['graph', 'bars'])
     expect(fitBlocks([{ block: 'graph', rows: 20 }, { block: 'bars', rows: 2 }], 10)).toEqual(['graph'])
     expect(fitBlocks([{ block: 'time', rows: 0 }, { block: 'bars', rows: 2 }], 10)).toEqual(['bars'])
+  })
+
+  test('a graph too tall for the pane loses its quiet branches, then all, then folds its oldest stages', () => {
+    const node = (label: string, state: 'done' | 'now' | 'todo', branches: { label: string; state: 'done' | 'failed'; note: string; back: boolean }[] = []) => ({ label, state, note: '12쪽', branches, from: 0 })
+    const nodes = [
+      node('준비', 'done', [
+        { label: '조사', state: 'done', note: '64장', back: false },
+        { label: '누락', state: 'failed', note: '3개', back: true },
+      ]),
+      node('빌드', 'done'),
+      node('검사', 'done'),
+      node('최적화', 'now'),
+      node('배포', 'todo'),
+    ]
+    // Wide and tall: as it is.
+    expect(fitGraph(nodes, 120, 40)).toEqual(nodes)
+    // Rows for one branch: the failure stays, the side task that went fine goes.
+    expect(fitGraph(nodes, 120, 12).map(one => one.branches.map(branch => branch.label))).toEqual([['누락'], [], [], [], []])
+    // No room for a branch: none.
+    expect(fitGraph(nodes, 120, 4).every(one => one.branches.length === 0)).toBe(true)
+    // Two boxes across and nine rows: the oldest finished stages fold into one box.
+    expect(fitGraph(nodes, 34, 9).map(one => `${one.label} ${one.note}`)).toEqual(['… 2단계', '검사 12쪽', '최적화 12쪽', '배포 12쪽'])
   })
 
   test('the size class changes with the boxes across or a band of rows', () => {

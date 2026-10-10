@@ -45,11 +45,11 @@ const SIGNAL_DESCRIPTION = [
 const SYSTEM = [
   '너는 Claude Code 세션의 작업 현황을 도식으로 설계한다. 사용자가 작업의 흐름과 지금 위치를 한눈에 보고 통제하게 하는 것이 목적이다.',
   '작업 기록을 읽고 이 작업에 맞는 도식을 고른다. 문장은 쓰지 않는다. 실행 중인 셸, 서브 에이전트, 사용자 대기는 mod가 위에 따로 보여 주므로 도식에 넣지 않는다.',
-  'JSON 하나만 출력한다: {"now": "지금 하는 일, 짧게", "blocks": [중요한 것부터]}',
+  'JSON 하나만 출력한다: {"now": "지금 하는 일, 20자 이내", "blocks": [중요한 것부터]}',
   '- {"kind": "graph", "nodes": [{"label": "", "state": "done|now|todo|failed|wait", "note": "", "from": 기록 번호, "branches": [{"label": "", "state": "", "note": "", "back": false}]}]}',
-  '  작업의 단계 흐름. 거의 항상 첫 블록. label은 한 단어 명사, note는 핵심 수치나 대상(없으면 빈 문자열), from은 그 단계가 시작된 기록 번호.',
+  '  작업의 단계 흐름. 거의 항상 첫 블록. label은 한 단어 명사 2~4자, note는 핵심 수치나 대상 8자 이내(없으면 빈 문자열), from은 그 단계가 시작된 기록 번호.',
   '  실패, 대기, 재시도, 곁다리 작업은 본 흐름에 두지 않고 그 단계의 branches로 둔다. 실패를 고쳐 넘어갔으면 back을 true로. 늘 붙어 다니는 단계는 하나로 묶는다.',
-  '- {"kind": "bars", "items": [{"label": "", "value": 숫자, "max": 숫자, "tone": "normal|good|warn|bad", "from": 기록 번호}]}  진행률이나 견줄 수치가 있을 때(epoch, 처리 개수, 점수). from은 그 값을 확인한 기록 번호.',
+  '- {"kind": "bars", "items": [{"label": "", "value": 숫자, "max": 숫자, "tone": "normal|good|warn|bad", "from": 기록 번호}]}  끝이 정해진 진행률이 있을 때(epoch, 처리 개수, 점수). label은 6자 이내. from은 그 값을 확인한 기록 번호.',
   '- {"kind": "time"}  단계마다 실제로 걸린 시간. 작업이 길어 어디서 시간이 갔는지 볼 만할 때.',
   '창이 좁으면 상자를 줄이고 블록을 적게, 넓으면 단계를 나눠 펼친다. 창에 넘치는 블록은 뒤에서부터 잘린다.',
   '지난번 도식이 있으면 작업이 크게 바뀌지 않는 한 구성을 유지한다.',
@@ -277,10 +277,14 @@ export const register: Register = (on, options) => {
     const topRows = top.length + top.filter(item => item.last !== '').length
 
     // Below it, only diagrams: as many as the pane holds, the model's most important first.
+    const room = rows - topRows - (topRows > 0 ? 1 : 0)
     const blocks = fitBlocks(
       // A summary an older version of the mod wrote may hold kinds it no longer draws.
-      (written?.blocks ?? []).filter(block => KINDS.has(block.kind)).map(block => ({ block, rows: blockRows(block, columns, byId, at) })),
-      rows - topRows,
+      (written?.blocks ?? [])
+        .filter(block => KINDS.has(block.kind))
+        .map(block => (block.kind === 'graph' ? { ...block, nodes: fitGraph(block.nodes, columns, room) } : block))
+        .map(block => ({ block, rows: blockRows(block, columns, byId, at) })),
+      room + (topRows > 0 ? 1 : 0),
     )
 
     return (
@@ -358,6 +362,26 @@ export function fitBlocks<B>(blocks: readonly { block: B; rows: number }[], room
     used += 1 + rows
   }
   return kept
+}
+
+/**
+ * The graph made to fit `room` rows: first the side tasks that went fine are
+ * left out, then every branch, then the oldest finished stages fold into one
+ * box that counts them. What is current and what is left always stays.
+ */
+export function fitGraph(nodes: readonly GraphNode[], columns: number, room: number): GraphNode[] {
+  if (graphHeight(nodes, columns) <= room) return [...nodes]
+  const quiet = nodes.map(node => ({ ...node, branches: node.branches.filter(branch => branch.state !== 'done' && branch.state !== 'now') }))
+  if (graphHeight(quiet, columns) <= room) return quiet
+  const bare: GraphNode[] = nodes.map(node => ({ ...node, branches: [] }))
+  const settled = bare.findIndex(node => node.state !== 'done' && node.state !== 'failed')
+  const foldable = settled === -1 ? bare.length - 1 : settled
+  let fitted = bare
+  for (let folded = 2; folded <= foldable && graphHeight(fitted, columns) > room; folded++) {
+    const fold: GraphNode = { label: '…', state: 'done', note: `${folded}단계`, branches: [], from: bare[0]!.from }
+    fitted = [fold, ...bare.slice(folded)]
+  }
+  return fitted
 }
 
 // How each state is drawn: the box's border and color, and the symbol before the label.
