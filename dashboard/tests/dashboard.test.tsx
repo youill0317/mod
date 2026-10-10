@@ -34,14 +34,15 @@ describe('the progress dashboard', () => {
     await clock.advance(0)
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await ui.find({ type: 'Text', text: /● 셸 {2}학습 재개/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^▶ 학습 재개/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /▶ 셸 · / })).toBeDefined()
       await ui.unmount()
     }
 
     finish()
     await call
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /● 셸/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ / })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /셸 끝남 .*학습 재개/ })).toBeDefined()
     await ui.unmount()
   })
@@ -71,8 +72,7 @@ describe('the progress dashboard', () => {
     expect(await ui.find({ type: 'Text', text: /epoch 3 결과 확인/ })).toBeDefined()
     // A section with nothing in it, and the live sections with nothing to show, stay hidden.
     expect(await ui.find({ type: 'Text', text: /막힌 것/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /돌아가는 것/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /나를 기다리는 것/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^[◆▶◎↻] / })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -84,13 +84,13 @@ describe('the progress dashboard', () => {
     const call = $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: '어느 체크포인트로 이어갈까요?', header: 'Resume', options: [], multiSelect: false }] } as never)
     await clock.advance(0)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /^ {2}질문: 어느 체크포인트로/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문/ })).toBeDefined()
     await ui.unmount()
 
     answer()
     await call
     const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await after.find({ type: 'Text', text: /^ {2}질문: 어느 체크포인트로/ })).toBeUndefined()
+    expect(await after.find({ type: 'Text', text: /^◆ 어느 체크포인트로 이어갈까요\? · 질문/ })).toBeUndefined()
     await after.unmount()
   })
 
@@ -106,12 +106,12 @@ describe('the progress dashboard', () => {
     await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기' } })
 
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /^ {2}권한 요청: 셸: Kaggle 데이터셋 만들기/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◆ 셸: Kaggle 데이터셋 만들기 · 권한 요청/ })).toBeDefined()
     await ui.unmount()
 
     await $.prompt.submit({ text: '허용했어', origin: { kind: 'composer' }, wait: false } as never)
     const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await after.find({ type: 'Text', text: /^ {2}권한 요청/ })).toBeUndefined()
+    expect(await after.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
     await after.unmount()
     finish()
     await call
@@ -132,12 +132,12 @@ describe('the progress dashboard', () => {
       fork: false,
     } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: /● 서브 에이전트 {2}general-purpose: GPU 패스 추가/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◎ general-purpose: GPU 패스 추가/ })).toBeDefined()
     await ui.unmount()
 
     await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' } as never)
     const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await after.find({ type: 'Text', text: /● 서브 에이전트/ })).toBeUndefined()
+    expect(await after.find({ type: 'Text', text: /^◎ / })).toBeUndefined()
     expect(await after.find({ type: 'Text', text: /서브 에이전트 끝남: general-purpose: GPU 패스 추가/ })).toBeDefined()
     await after.unmount()
   })

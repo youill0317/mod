@@ -12,8 +12,19 @@ const running = atom({ plugin: 'dashboard', key: 'running' } as const, [])
 const waiting = atom({ plugin: 'dashboard', key: 'waiting' } as const, [])
 const summary = atom({ plugin: 'dashboard', key: 'summary' } as const, null)
 const phase = atom({ plugin: 'dashboard', key: 'phase' } as const, '')
-const lastSeen = atom({ plugin: 'dashboard', key: 'lastSeen' } as const, 0)
 const now = atom({ plugin: 'dashboard', key: 'now' } as const, 0)
+
+// The symbols that lead what waits on the person and what runs.
+const WAITING = '◆'
+const SHELL = '▶'
+const AGENT = '◎'
+const BACKGROUND = '↻'
+const LEGEND: readonly (readonly [string, string])[] = [
+  [WAITING, '나를 기다림'],
+  [SHELL, '셸'],
+  [AGENT, '서브 에이전트'],
+  [BACKGROUND, '백그라운드'],
+]
 
 const MAX_LOG = 300
 const LOG_FOR_MODEL = 80
@@ -41,7 +52,7 @@ const SYSTEM = [
   ' "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 30자 이내, 아니면 빈 문자열",',
   ' "sections": [{"title": "칸 이름, 12자 이내", "lines": [{"text": "40자 이내", "from": 기록 번호 또는 0, "tone": "normal|good|warn|bad|muted"}]}]}',
   '칸은 지금 작업에 맞게 정한다. 자주 쓰는 칸은 "지나온 단계", "확인한 상태", "막힌 것", "다음"이고, 작업에 따라 "세션별 현황", "실험별 진행"처럼 더하거나 이름을 바꿔도 된다.',
-  '칸은 최대 5개, 칸마다 줄은 최대 8개. 내용 없는 칸은 만들지 않는다. 자리 비운 사이를 보여 주는 단계 칸은 거의 항상 둔다.',
+  '칸은 최대 5개, 칸마다 줄은 최대 8개. 내용 없는 칸은 만들지 않는다. 지나온 단계 칸은 거의 항상 둔다.',
   '지난번에 쓴 대시보드가 있으면 작업이 크게 바뀌지 않는 한 칸 이름과 순서를 그대로 유지한다. 사용자가 돌아왔을 때 같은 자리를 보게 하기 위해서다.',
   'from은 그 줄을 보여 주는 기록의 번호다. 시간이 의미 있는 줄(단계, 확인한 상태)에는 꼭 넣고, 아니면 0으로 둔다. 단계는 최신순으로 쓰고 사소한 기록은 묶는다.',
   'tone은 막힘이나 실패면 bad, 주의가 필요하면 warn, 끝난 것은 good, 덜 중요한 것은 muted, 나머지는 normal.',
@@ -199,7 +210,6 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer') {
-      await update($, lastSeen, () => Date.now())
       // The person is here: a dialog they answered is no longer waiting.
       await update($, waiting, list => list.filter(item => item.kind !== 'permission'))
       await record($, 'prompt', `사용자 요청: ${excerpt(e.text, 200)}`)
@@ -222,14 +232,11 @@ export const register: Register = (on, options) => {
     const waits = await read($, waiting)
     const written = await read($, summary)
     const said = await read($, phase)
-    const seen = await read($, lastSeen)
     const at = Math.max(await read($, now), Date.now())
 
     const byId = new Map(entries.map(entry => [entry.id, entry]))
-    const missed = seen === 0 ? 0 : entries.filter(entry => entry.at > seen && entry.kind !== 'prompt').length
     const unwritten = entries.filter(entry => entry.id > (written?.covers ?? 0)).length
     const title = written?.title || '작업 과정'
-    const head = missed > 0 ? `보신 뒤 +${missed}` : ''
 
     // Before the first summary, the raw log stands in for the steps.
     const sections =
@@ -248,75 +255,66 @@ export const register: Register = (on, options) => {
     const waitNote = written?.waiting ?? ''
     const toneColor = { normal: undefined, good: 'success', warn: 'warning', bad: 'error', muted: undefined } as const
 
-    const heading = (text: string) => (
-      <Text bold color="claude">
-        {truncate(text, columns)}
-      </Text>
-    )
+    // What waits on the person and what runs, each line led by its symbol.
+    const live = [
+      ...waits.map(item => ({
+        symbol: WAITING,
+        color: 'warning',
+        text: `${item.label} · ${item.kind === 'question' ? '질문' : '권한 요청'} ${ageText(at - item.since)}째`,
+        age: '',
+        last: '',
+      })),
+      ...(waitNote === '' ? [] : [{ symbol: WAITING, color: 'warning', text: waitNote, age: '', last: '' }]),
+      ...runs.map(item => ({
+        symbol: item.kind === 'agent' ? AGENT : item.background ? BACKGROUND : SHELL,
+        color: 'suggestion',
+        text: item.label,
+        age: `  ${ageText(at - item.startedAt)}`,
+        last: item.last,
+      })),
+    ]
+    const shown = new Set(live.map(item => item.symbol))
+    const legend = LEGEND.filter(([symbol]) => shown.has(symbol)).map(([symbol, name]) => `${symbol} ${name}`)
+    const footer = [...legend, written === null ? '아직 정리 전' : `${ageText(at - written.at)} 전 정리`, ...(unwritten > 0 ? [`새 기록 ${unwritten}개 정리 대기`] : [])].join(' · ')
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row">
-          <Text bold>{truncate(title, Math.max(8, columns - width(head) - 2))}</Text>
-          <Text dimColor>{head === '' ? '' : `  ${head}`}</Text>
-        </Box>
+        <Text bold>{truncate(title, columns)}</Text>
         <Text>{truncate(`지금  ${written?.now || said || '아직 기록이 없습니다'}`, columns)}</Text>
 
-        {(waits.length > 0 || waitNote !== '') && (
+        {live.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            {heading('▸ 나를 기다리는 것')}
-            {waits.map(item => (
-              <Text color="warning">{truncate(`  ${item.kind === 'question' ? '질문' : '권한 요청'}: ${item.label}  ${ageText(at - item.since)}째`, columns)}</Text>
+            {live.map(item => (
+              <Box flexDirection="column">
+                <Box flexDirection="row">
+                  <Text color={item.color}>{truncate(`${item.symbol} ${item.text}`, Math.max(8, columns - width(item.age)))}</Text>
+                  <Text dimColor>{item.age}</Text>
+                </Box>
+                {item.last !== '' && <Text dimColor>{truncate(`    ${item.last}`, columns)}</Text>}
+              </Box>
             ))}
-            {waitNote !== '' && <Text color="warning">{truncate(`  ${waitNote}`, columns)}</Text>}
           </Box>
         )}
 
-        {runs.length > 0 && (
+        {sections.map(section => (
           <Box flexDirection="column" marginTop={1}>
-            {heading('▸ 돌아가는 것')}
-            {runs.map(item => {
-              const kind = item.kind === 'agent' ? '서브 에이전트' : item.background ? '백그라운드 셸' : '셸'
-              const age = `  ${ageText(at - item.startedAt)}`
+            <Text bold color="claude">
+              {truncate(`▸ ${section.title}`, columns)}
+            </Text>
+            {section.lines.map(line => {
+              const entry = byId.get(line.from)
+              const when = entry === undefined ? '' : `${pad(ageText(at - entry.at) + ' 전', 9)} `
               return (
-                <Box flexDirection="column">
-                  <Box flexDirection="row">
-                    <Text color="suggestion">{truncate(`  ● ${kind}  ${item.label}`, Math.max(8, columns - width(age)))}</Text>
-                    <Text dimColor>{age}</Text>
-                  </Box>
-                  {item.last !== '' && <Text dimColor>{truncate(`      ${item.last}`, columns)}</Text>}
-                </Box>
+                <Text color={toneColor[line.tone]} dimColor={line.tone === 'muted'}>
+                  {truncate(`  ${when}${line.text}`, columns)}
+                </Text>
               )
             })}
           </Box>
-        )}
-
-        {sections.map(section => {
-          const marked = section.lines.some(line => seen !== 0 && (byId.get(line.from)?.at ?? 0) > seen)
-          return (
-            <Box flexDirection="column" marginTop={1}>
-              {heading(marked ? `▸ ${section.title}  ★ 자리 비운 사이` : `▸ ${section.title}`)}
-              {section.lines.map(line => {
-                const entry = byId.get(line.from)
-                const mark = entry !== undefined && seen !== 0 && entry.at > seen ? '★ ' : '  '
-                const when = entry === undefined ? '' : `${pad(ageText(at - entry.at) + ' 전', 9)} `
-                return (
-                  <Text color={toneColor[line.tone]} dimColor={line.tone === 'muted'}>
-                    {truncate(`  ${mark}${when}${line.text}`, columns)}
-                  </Text>
-                )
-              })}
-            </Box>
-          )
-        })}
+        ))}
 
         <Box marginTop={1}>
-          <Text dimColor>
-            {truncate(
-              written === null ? '아직 정리 전입니다' : `${ageText(at - written.at)} 전 정리${unwritten > 0 ? ` · 새 기록 ${unwritten}개 정리 대기` : ''}`,
-              columns,
-            )}
-          </Text>
+          <Text dimColor>{truncate(footer, columns)}</Text>
         </Box>
       </Box>
     )

@@ -73,7 +73,6 @@ declare module 'claude-code' {
       waiting: WaitingItem[]
       summary: Summary | null
       phase: string
-      lastSeen: number
       now: number
     }
   }
