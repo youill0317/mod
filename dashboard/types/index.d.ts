@@ -50,8 +50,8 @@ export type NodeState = 'done' | 'now' | 'todo' | 'failed' | 'wait'
 /** A step that hangs under a stage: a failure, a retry, a wait, a side task. */
 export type GraphBranch = { label: string; state: NodeState; note: string; back: boolean }
 
-/** One stage of the work's main path, with what hangs under it. */
-export type GraphNode = { label: string; state: NodeState; note: string; branches: GraphBranch[] }
+/** One stage of the work's main path, with what hangs under it; `from` is the log entry it began at. */
+export type GraphNode = { label: string; state: NodeState; note: string; branches: GraphBranch[]; from: number }
 
 /** `from` is the log entry a value was seen in, 0 for none: the pane shows how long ago. */
 export type SummaryBlock =
@@ -60,6 +60,8 @@ export type SummaryBlock =
   | { kind: 'bars'; title: string; items: { label: string; value: number; max: number; note: string; tone: Tone; from: number }[] }
   | { kind: 'metrics'; title: string; items: { label: string; value: string; tone: Tone; from: number }[] }
   | { kind: 'list'; title: string; items: { text: string; tone: Tone }[] }
+  /** The graph's stages on one time axis, from the log entries they began at. */
+  | { kind: 'time'; title: string; items: { label: string; state: NodeState; from: number }[] }
 
 /** What the small model wrote, from the log. */
 export type Summary = {

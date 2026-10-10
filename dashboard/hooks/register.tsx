@@ -46,18 +46,22 @@ const SYSTEM = [
   'JSON 하나만 출력한다. 형식:',
   '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일, 30자 이내", "waiting": "Claude가 답을 마치고 사용자의 결정을 기다리면 25자 이내. 사용자를 기다리는 것 목록에 이미 있으면 빈 문자열", "blocks": [블록...]}',
   '블록 종류:',
-  '- {"kind": "graph", "title": "", "nodes": [{"label": "단계", "state": "done|now|todo|failed|wait", "note": "", "branches": [{"label": "", "state": "...", "note": "", "back": false}]}]}',
+  '- {"kind": "graph", "title": "", "nodes": [{"label": "단계", "state": "done|now|todo|failed|wait", "note": "", "from": 기록 번호, "branches": [{"label": "", "state": "...", "note": "", "back": false}]}]}',
   '  작업의 주된 흐름을 상자와 화살표로 그린다. nodes는 일어난 순서대로 3~8개, 지난 단계와 지금 단계와 다음 단계. now 뒤에는 todo만 둔다. 항상 첫 블록으로 둔다.',
+  '  from은 그 단계가 시작된 기록의 번호다. todo는 0.',
   '  branches는 그 단계에서 갈라진 일이다: 실패(failed), 사용자 대기(wait), 따로 돈 서브 에이전트나 작업(done/now). 실패를 고치고 다시 해서 넘어갔으면 back을 true로. 단계마다 최대 2개.',
+  '  실패, 대기, 재시도는 본 흐름 상자로 두지 않고 그것이 일어난 단계의 갈래로 둔다. 본 흐름 상자가 failed인 것은 그 단계가 실패로 끝나 더 나아가지 못할 때뿐이다.',
+  '  늘 같이 붙어 다니는 두 단계는 한 상자로 묶는다. 빼도 흐름을 알 수 있는 상자, 갈래, note는 뺀다. note는 상태나 기호로 이미 보이는 것을 되풀이하지 않는다.',
   '  label은 한 단어 명사, 한글 4자 이내(예: 준비, 변환, 빌드, 배포, 학습). note는 그 단계의 핵심 수치나 대상, 8자 이내(예: 12쪽, 38/64, epoch 2), 없으면 빈 문자열.',
   '- {"kind": "table", "title": "", "columns": ["열"], "rows": [{"cells": ["값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 파일)을 비교할 때만. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
   '- {"kind": "bars", "title": "", "items": [{"label": "", "value": 숫자, "max": 숫자, "note": "", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등)이 있을 때만. note에 value/max를 되풀이하지 않는다.',
   '- {"kind": "metrics", "title": "", "items": [{"label": "", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  꼭 봐야 할 숫자 2~4개가 있을 때만.',
+  '- {"kind": "time", "title": ""}  graph의 단계들이 실제로 얼마나 걸렸는지 한 시간 축에 그린다. 시각과 길이는 mod가 graph nodes의 from으로 잰다. 작업이 길어 어디서 시간이 갔는지가 중요할 때만.',
   '- {"kind": "list", "title": "", "items": [{"text": "20자 이내", "tone": "..."}]}  도식으로 나타낼 수 없는 것만, 최대 2줄. 거의 쓰지 않는다.',
   '블록 제목은 기본으로 빈 문자열이다. 블록만 보고 무엇인지 알 수 없을 때만 한 단어 명사로 붙인다(예: 세션, 실험, 점수).',
   '열 이름, 막대 이름, 숫자 이름도 한 단어 명사로 쓴다. "막힌 것", "확인할 것", "~한 ~"처럼 서술어가 붙은 말은 절대 쓰지 않는다. 보면 아는 말("지금", "현황")은 쓰지 않는다.',
   '창 크기와 그 창에 맞는 한도가 주어지면 넘기지 않는다. 상자가 모자라면 지난 단계들을 한 상자로 묶고(예: 준비, 변환, 빌드 → 빌드), 지금 단계와 다음 단계는 남긴다. 넓은 창이면 단계를 나눠 더 펼친다.',
-  '다른 블록이 차지하는 줄: table은 행 수+2줄, bars는 항목마다 1줄, metrics는 4줄, 블록 사이 1줄. 줄이 모자라면 덜 중요한 블록부터 빼고 표의 행과 막대 항목을 줄인다. 남으면 억지로 채우지 않는다.',
+  '다른 블록이 차지하는 줄: table은 행 수+2줄, bars는 항목마다 1줄, metrics는 4줄, time은 todo가 아닌 단계 수만큼, 블록 사이 1줄. 줄이 모자라면 덜 중요한 블록부터 빼고 표의 행과 막대 항목을 줄인다. 남으면 억지로 채우지 않는다.',
   '블록은 최대 4개. 내용 없는 블록은 만들지 않는다. 지난번 대시보드가 있으면 작업이 크게 바뀌지 않는 한 블록 종류와 순서를 유지한다.',
   'from은 그 값을 확인한 기록의 번호다. 바깥 상태(학습 epoch, 세션 상태 등)에는 꼭 넣고, 아니면 0으로 둔다.',
   'tone은 normal, good(끝남), warn(주의), bad(실패), muted(덜 중요) 중 하나.',
@@ -350,12 +354,15 @@ function drawBlock(BoxEl: unknown, TextEl: unknown, block: SummaryBlock, columns
       return drawMetrics(Box, Text, block.items.map(item => ({ ...item, age: ago(item.from) })), columns)
     case 'list':
       return h(Box, { flexDirection: 'column' }, ...block.items.map(item => h(Text, { color: TONE_COLOR[item.tone], dimColor: item.tone === 'muted' }, truncate(`• ${item.text}`, columns))))
+    case 'time':
+      return drawTime(Box, Text, spans(block.items, byId, at), columns)
   }
 }
 
 // How each state is drawn: the box's border and color, and the symbol before the label.
 const NODE_LOOK: Record<NodeState, { symbol: string; border: string; color: string | undefined; dim: boolean; bold: boolean }> = {
-  done: { symbol: '✓', border: 'round', color: 'success', dim: false, bold: false },
+  // Done stages stay quiet: color is kept for where the eye should go.
+  done: { symbol: '✓', border: 'round', color: 'subtle', dim: false, bold: false },
   now: { symbol: '●', border: 'bold', color: 'suggestion', dim: false, bold: true },
   todo: { symbol: '○', border: 'dashed', color: 'subtle', dim: true, bold: false },
   failed: { symbol: '✗', border: 'round', color: 'error', dim: false, bold: false },
@@ -452,6 +459,59 @@ export function graphRows(widths: readonly number[], room: number): number[][] {
   // A column's arrow is part of its width: the last on a row hangs one, which still fits.
   const fits = even.length === greedy.length && even.every(row => row.reduce((sum, i) => sum + widths[i]!, 0) <= room)
   return fits ? even : greedy
+}
+
+/**
+ * Each stage's start and length from the log entries the stages began at: a
+ * stage lasts until the next one begins, the last until now. A start the model
+ * cited out of order is held at the one before, and a stage whose entry is
+ * gone from the log is left out.
+ */
+export function spans(items: readonly { label: string; state: NodeState; from: number }[], byId: ReadonlyMap<number, { at: number }>, at: number): { label: string; state: NodeState; start: number; end: number }[] {
+  const started: { label: string; state: NodeState; start: number }[] = []
+  for (const item of items) {
+    const entry = byId.get(item.from)
+    if (entry === undefined) continue
+    started.push({ label: item.label, state: item.state, start: Math.max(entry.at, started[started.length - 1]?.start ?? entry.at) })
+  }
+  return started.map((item, i) => ({ ...item, end: Math.max(item.start, started[i + 1]?.start ?? at) }))
+}
+
+/**
+ * The stages on one honest time axis, a row each: where the bar starts is when
+ * the stage began, its length how long it took. The current stage is the one
+ * in color.
+ *
+ *   준비  ██                      3분
+ *   빌드    ████████             22분
+ *   배포            ██████  14분째
+ */
+function drawTime(Box: Draw, Text: Draw, rows: readonly { label: string; state: NodeState; start: number; end: number }[], columns: number): Node {
+  if (rows.length === 0) return null
+  const first = rows[0]!.start
+  const last = Math.max(...rows.map(row => row.end))
+  const tails = rows.map(row => `${ageText(row.end - row.start)}${row.state === 'now' ? '째' : ''}`)
+  const labelWidth = Math.min(10, Math.max(...rows.map(row => width(row.label))))
+  const tailWidth = Math.max(...tails.map(width))
+  const area = Math.max(8, Math.min(48, columns - labelWidth - 2 - 1 - tailWidth))
+  const scale = (ms: number) => (last === first ? 0 : Math.round(((ms - first) / (last - first)) * area))
+  return h(
+    Box,
+    { flexDirection: 'column' },
+    ...rows.map((row, i) => {
+      const from = Math.min(area - 1, scale(row.start))
+      const length = Math.max(1, Math.min(area - from, scale(row.end) - from))
+      const look = NODE_LOOK[row.state]
+      return h(
+        Box,
+        { flexDirection: 'row' },
+        h(Text, { dimColor: row.state !== 'now', bold: row.state === 'now' }, `${pad(truncate(row.label, labelWidth), labelWidth)}  `),
+        h(Text, {}, ' '.repeat(from)),
+        h(Text, { color: look.color === 'subtle' ? undefined : look.color, dimColor: row.state === 'done' }, '█'.repeat(length)),
+        h(Text, { dimColor: row.state !== 'now' }, `${' '.repeat(area - from - length)} ${tails[i]!}`),
+      )
+    }),
+  )
 }
 
 function drawTable(Box: Draw, Text: Draw, head: readonly string[], rows: readonly { cells: readonly string[]; tone: Tone; age: string }[], columns: number): Node {
@@ -755,8 +815,23 @@ export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summa
     .map(obj)
     .map(block => parseBlock(block, ids))
     .filter((block): block is SummaryBlock => block !== undefined)
+    .map(block => (block.kind === 'time' ? timeOf(block.title, raw.blocks, ids) : block))
+    .filter((block): block is SummaryBlock => block !== undefined)
     .slice(0, 5)
   return { title: str(raw.title, 30), now: str(raw.now, 60), waiting: str(raw.waiting, 50), blocks }
+}
+
+/** A time block over the graph's stages that began somewhere in the log; none with fewer than two. */
+function timeOf(title: string, blocks: unknown, ids: ReadonlySet<number>): SummaryBlock | undefined {
+  const graph = list(blocks).map(obj).find(block => block.kind === 'graph' || block.kind === 'flow')
+  if (graph === undefined) return undefined
+  const nodes = inOrder(
+    list(graph.kind === 'flow' ? graph.steps : graph.nodes)
+      .map(obj)
+      .map(node => ({ label: str(node.label, 10), state: stateOf(node.state), from: typeof node.from === 'number' && ids.has(node.from) ? node.from : 0 })),
+  )
+  const items = nodes.filter(node => node.label !== '' && node.state !== 'todo' && node.from > 0)
+  return items.length < 2 ? undefined : { kind: 'time', title, items }
 }
 
 function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): SummaryBlock | undefined {
@@ -772,6 +847,7 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
           label: str(node.label, 10),
           state: stateOf(node.state),
           note: str(node.note, 12),
+          from: from(node.from),
           branches: list(node.branches)
             .map(obj)
             .map(branch => ({ label: str(branch.label, 10), state: stateOf(branch.state), note: str(branch.note, 12), back: branch.back === true }))
@@ -808,6 +884,9 @@ function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): S
         .slice(0, 4)
       return items.length === 0 ? undefined : { kind: 'metrics', title, items }
     }
+    case 'time':
+      // Its stages are the graph's, filled in once the whole answer is read.
+      return { kind: 'time', title, items: [] }
     case 'list': {
       const items = list(block.items)
         .map(item => (typeof item === 'string' ? { text: item } : obj(item)))

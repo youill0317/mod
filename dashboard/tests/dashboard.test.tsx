@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { fitOf, graphRows, inOrder, parseSummary, promptFor, repeatsValue, roomFor, stableKey } from '../hooks/register'
+import { fitOf, graphRows, inOrder, parseSummary, promptFor, repeatsValue, roomFor, spans, stableKey } from '../hooks/register'
 
 const PANE = {
   plugin: 'dashboard',
@@ -21,8 +21,8 @@ const WRITTEN = JSON.stringify({
       kind: 'graph',
       title: '',
       nodes: [
-        { label: '확인', state: 'done', note: 'epoch 2', branches: [{ label: '끊김', state: 'failed', note: 'L4 2대', back: true }] },
-        { label: '이동', state: 'now', note: 'Kaggle', branches: [] },
+        { label: '확인', state: 'done', note: 'epoch 2', from: 1, branches: [{ label: '끊김', state: 'failed', note: 'L4 2대', back: true }] },
+        { label: '이동', state: 'now', note: 'Kaggle', from: 2, branches: [] },
         { label: '재개', state: 'todo', note: '', branches: [] },
       ],
     },
@@ -31,6 +31,7 @@ const WRITTEN = JSON.stringify({
     { kind: 'metrics', title: '', items: [{ label: 'val AUC', value: '0.871', tone: 'good', from: 0 }, { label: '남은 epoch', value: '8', tone: 'normal', from: 0 }] },
     { kind: 'list', title: '실패', items: [] },
     { kind: 'chart', title: '없는 종류' },
+    { kind: 'time', title: '' },
   ],
 })
 
@@ -94,6 +95,9 @@ describe('the progress dashboard', () => {
     expect(await ui.find({ type: 'Text', text: /2\/10 {2}AUC 0\.871/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '0.871' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '남은 epoch' })).toBeDefined()
+    // The stages on one time axis, the current one counting up.
+    expect(await ui.find({ type: 'Text', text: /^확인 {2}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: / 2초째$/ })).toBeDefined()
     // An empty block, an unknown kind, and the live lines with nothing to show stay out.
     expect(await ui.find({ type: 'Text', text: /^실패$|없는 종류/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^[◆▶◎↻] / })).toBeUndefined()
@@ -214,7 +218,7 @@ describe('helpers', () => {
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'graph', title: '', nodes: [{ label: '확인', state: 'done', note: '', branches: [] }] }], covers: 1, at: 0, fit: '4L' },
+      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'graph', title: '', nodes: [{ label: '확인', state: 'done', note: '', branches: [], from: 1 }] }], covers: 1, at: 0, fit: '4L' },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',
@@ -235,6 +239,22 @@ describe('helpers', () => {
     expect(fitOf({ columns: 100, rows: 40 })).toBe(fitOf({ columns: 98, rows: 41 }))
     expect(fitOf({ columns: 100, rows: 40 })).not.toBe(fitOf({ columns: 100, rows: 20 }))
     expect(fitOf(null)).toBe('')
+  })
+
+  test('a stage lasts until the next begins, the last until now', () => {
+    const byId = new Map([[1, { at: 0 }], [2, { at: 60_000 }], [3, { at: 30_000 }]])
+    const items = [
+      { label: '빌드', state: 'done' as const, from: 1 },
+      { label: '검사', state: 'done' as const, from: 2 },
+      // Cited out of order: held at the start before it.
+      { label: '배포', state: 'now' as const, from: 3 },
+      { label: '없음', state: 'done' as const, from: 9 },
+    ]
+    expect(spans(items, byId, 120_000)).toEqual([
+      { label: '빌드', state: 'done', start: 0, end: 60_000 },
+      { label: '검사', state: 'done', start: 60_000, end: 60_000 },
+      { label: '배포', state: 'now', start: 60_000, end: 120_000 },
+    ])
   })
 
   test('boxes that wrap are spread evenly over the rows', () => {
