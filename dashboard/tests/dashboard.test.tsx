@@ -19,9 +19,9 @@ const WRITTEN = JSON.stringify({
   blocks: [
     { kind: 'flow', title: '', steps: [{ label: '체크포인트 확인', state: 'done' }, { label: 'Kaggle로 이동', state: 'now' }, { label: '학습 재개', state: 'todo' }] },
     { kind: 'table', title: '세션', columns: ['세션', 'GPU', '상태'], rows: [{ cells: ['l4a', 'L4', '종료'], tone: 'bad', from: 2 }, { cells: ['l4c', 'T4', '대기'], tone: 'muted', from: 0 }] },
-    { kind: 'bars', title: '실험', items: [{ label: 't384_lr1e4', value: 2, max: 10, note: 'AUC 0.871', tone: 'normal', from: 0 }] },
+    { kind: 'bars', title: '실험 진행 상황', items: [{ label: 't384_lr1e4', value: 2, max: 10, note: 'AUC 0.871', tone: 'normal', from: 0 }] },
     { kind: 'metrics', title: '', items: [{ label: 'val AUC', value: '0.871', tone: 'good', from: 0 }, { label: '남은 epoch', value: '8', tone: 'normal', from: 0 }] },
-    { kind: 'list', title: '막힌 것', items: [] },
+    { kind: 'list', title: '실패', items: [] },
     { kind: 'chart', title: '없는 종류' },
   ],
 })
@@ -77,11 +77,13 @@ describe('the progress dashboard', () => {
     expect(await ui.find({ type: 'Text', text: /^l4a +L4 +종료 +\d+초 전$/ })).toBeDefined()
     // A progress bar and the key numbers
     expect(await ui.find({ type: 'Text', text: /^█+$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^실험$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /진행 상황/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /2\/10 {2}AUC 0\.871/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '0.871' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '남은 epoch' })).toBeDefined()
     // An empty block, an unknown kind, and the live lines with nothing to show stay out.
-    expect(await ui.find({ type: 'Text', text: /막힌 것|없는 종류/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^실패$|없는 종류/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^[◆▶◎↻] / })).toBeUndefined()
     await ui.unmount()
   })

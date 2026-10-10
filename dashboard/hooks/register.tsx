@@ -45,10 +45,11 @@ const SYSTEM = [
   '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일을 머리말 없이, 30자 이내", "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 25자 이내, 아니면 빈 문자열", "blocks": [블록...]}',
   '블록 종류:',
   '- {"kind": "flow", "title": "", "steps": [{"label": "8자 이내", "state": "done|now|todo|failed"}]}  작업의 큰 단계 흐름. 지난 단계, 지금 단계, 다음 단계를 4~7개로. 거의 항상 첫 블록으로 둔다.',
-  '- {"kind": "table", "title": "표만으로 무엇인지 모를 때만 6자 이내, 아니면 빈 문자열", "columns": ["열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
-  '- {"kind": "bars", "title": "6자 이내", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등).',
-  '- {"kind": "metrics", "title": "", "items": [{"label": "8자 이내", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  핵심 숫자 2~4개.',
-  '- {"kind": "list", "title": "6자 이내", "items": [{"text": "30자 이내", "tone": "..."}]}  막힌 것처럼 꼭 글이 필요한 것만, 최대 3줄.',
+  '- {"kind": "table", "title": "표만으로 무엇인지 모를 때만 한 단어, 아니면 빈 문자열", "columns": ["한 단어 열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
+  '- {"kind": "bars", "title": "한 단어", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등).',
+  '- {"kind": "metrics", "title": "", "items": [{"label": "한두 단어 명사", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  핵심 숫자 2~4개.',
+  '- {"kind": "list", "title": "한 단어", "items": [{"text": "30자 이내", "tone": "..."}]}  실패처럼 꼭 글이 필요한 것만, 최대 3줄.',
+  '블록 제목, 열 이름, 숫자 이름은 한 단어 명사로 쓴다. 예: 세션, 실험, 실패, 진행, 커밋. "막힌 것", "확인할 것", "~한 ~"처럼 서술어가 붙은 말은 절대 쓰지 않는다.',
   '블록은 최대 5개. 작업에 맞는 것만 고르고 내용 없는 블록은 만들지 않는다.',
   '지난번에 쓴 대시보드가 있으면 작업이 크게 바뀌지 않는 한 블록 종류와 순서를 그대로 유지한다.',
   'from은 그 값을 확인한 기록의 번호다. 바깥 상태(학습 epoch, 세션 상태 등)에는 꼭 넣고, 아니면 0으로 둔다.',
@@ -242,7 +243,7 @@ export const register: Register = (on, options) => {
         ? written.blocks
         : recent.length === 0
           ? []
-          : [{ kind: 'table', title: '', columns: ['최근 기록'], rows: recent.map(entry => ({ cells: [entry.text], tone: 'normal' as const, from: entry.id })) }]
+          : [{ kind: 'table', title: '', columns: ['기록'], rows: recent.map(entry => ({ cells: [entry.text], tone: 'normal' as const, from: entry.id })) }]
     const waitNote = written?.waiting ?? ''
 
     // What waits on the person and what runs, each line led by its symbol.
@@ -586,7 +587,8 @@ export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summa
 }
 
 function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): SummaryBlock | undefined {
-  const title = str(block.title, 16)
+  // A block title is one word: whatever follows the first space is dropped.
+  const title = str(block.title, 16).split(/\s+/)[0] ?? ''
   const from = (value: unknown) => (typeof value === 'number' && ids.has(value) ? value : 0)
   switch (block.kind) {
     case 'flow': {
