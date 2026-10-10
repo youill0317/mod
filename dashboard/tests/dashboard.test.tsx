@@ -35,7 +35,6 @@ describe('the progress dashboard', () => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ type: 'Text', text: /^▶ 학습 재개/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /▶ 셸 · / })).toBeDefined()
       await ui.unmount()
     }
 

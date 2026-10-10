@@ -19,12 +19,6 @@ const WAITING = '◆'
 const SHELL = '▶'
 const AGENT = '◎'
 const BACKGROUND = '↻'
-const LEGEND: readonly (readonly [string, string])[] = [
-  [WAITING, '나를 기다림'],
-  [SHELL, '셸'],
-  [AGENT, '서브 에이전트'],
-  [BACKGROUND, '백그라운드'],
-]
 
 const MAX_LOG = 300
 const LOG_FOR_MODEL = 80
@@ -273,9 +267,7 @@ export const register: Register = (on, options) => {
         last: item.last,
       })),
     ]
-    const shown = new Set(live.map(item => item.symbol))
-    const legend = LEGEND.filter(([symbol]) => shown.has(symbol)).map(([symbol, name]) => `${symbol} ${name}`)
-    const footer = [...legend, written === null ? '아직 정리 전' : `${ageText(at - written.at)} 전 정리`, ...(unwritten > 0 ? [`새 기록 ${unwritten}개 정리 대기`] : [])].join(' · ')
+    const footer = [written === null ? '아직 정리 전' : `${ageText(at - written.at)} 전 정리`, ...(unwritten > 0 ? [`새 기록 ${unwritten}개 정리 대기`] : [])].join(' · ')
 
     return (
       <Box flexDirection="column">
