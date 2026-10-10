@@ -15,11 +15,13 @@ const DONE = { result: { stdout: 'epoch 3/10 loss=0.51', stderr: '', interrupted
 const WRITTEN = JSON.stringify({
   title: 'Colab 학습 재개',
   now: 'l4a에서 epoch 2 체크포인트로 학습 재개 중',
-  steps: [{ from: 1, text: 'Drive에서 체크포인트 확인' }],
-  checks: [{ label: 'l4a epoch', value: '3/10', from: 2 }],
-  blocked: [],
-  next: 'epoch 3 결과 확인',
   waiting: '',
+  sections: [
+    { title: '세션별 현황', lines: [{ text: 'l4a epoch 3/10', from: 2, tone: 'normal' }, { text: 'l4b 종료됨', from: 0, tone: 'bad' }] },
+    { title: '지나온 단계', lines: [{ text: 'Drive에서 체크포인트 확인', from: 1, tone: 'good' }] },
+    { title: '다음', lines: [{ text: 'epoch 3 결과 확인', from: 0, tone: 'normal' }] },
+    { title: '막힌 것', lines: [] },
+  ],
 })
 
 describe('the progress dashboard', () => {
@@ -44,7 +46,7 @@ describe('the progress dashboard', () => {
     await ui.unmount()
   })
 
-  test('a phase signal wakes the model, and its words fill the fixed sections', async ($, on) => {
+  test('a phase signal wakes the model, and the sections it chose are drawn', async ($, on) => {
     const clock = mock.clock(on)
     const asked: string[] = []
     on('model.complete', ($, e) => {
@@ -63,9 +65,14 @@ describe('the progress dashboard', () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /Colab 학습 재개/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /지금 {2}l4a에서 epoch 2/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▸ 세션별 현황/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /전 +l4a epoch 3\/10/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Drive에서 체크포인트 확인/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /l4a epoch {2}3\/10/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /epoch 3 결과 확인/ })).toBeDefined()
+    // A section with nothing in it, and the live sections with nothing to show, stay hidden.
+    expect(await ui.find({ type: 'Text', text: /막힌 것/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /돌아가는 것/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /나를 기다리는 것/ })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -148,7 +155,7 @@ describe('helpers', () => {
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { title: 't', now: 'n', steps: [], checks: [], blocked: [], next: '', waiting: '', covers: 1, at: 0 },
+      { title: 't', now: 'n', waiting: '', sections: [{ title: '지나온 단계', lines: [{ text: '확인', from: 1, tone: 'normal' }] }], covers: 1, at: 0 },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',
@@ -163,8 +170,10 @@ describe('helpers', () => {
   test('the answer is read even around a code fence, and unknown log ids are dropped', () => {
     const written = parseSummary('여기 있습니다\n```json\n' + WRITTEN + '\n```', new Set([1]))
     expect(written?.now).toContain('학습 재개')
-    expect(written?.steps[0]).toEqual({ from: 1, text: 'Drive에서 체크포인트 확인' })
-    expect(written?.checks[0]?.from).toBe(0)
+    expect(written?.sections.map(section => section.title)).toEqual(['세션별 현황', '지나온 단계', '다음'])
+    expect(written?.sections[1]?.lines[0]).toEqual({ text: 'Drive에서 체크포인트 확인', from: 1, tone: 'good' })
+    // A log id the model made up is dropped to 0.
+    expect(written?.sections[0]?.lines[0]?.from).toBe(0)
     expect(parseSummary('모르겠습니다', new Set())).toBeUndefined()
   })
 

@@ -34,14 +34,17 @@ const SIGNAL_DESCRIPTION = [
 const SYSTEM = [
   '너는 Claude Code 작업의 진행 대시보드를 쓴다. 사용자가 자리를 비웠다 돌아와도 작업 맥락을 바로 파악하고, 자리에 있을 때도 전체 과정을 통제할 수 있게 돕는 것이 목적이다.',
   '결과물, 계획, 파일 내용은 쓰지 않는다. 작업이 어떻게 흘러왔고 지금 어디에 있는지만 쓴다.',
+  '"돌아가는 것"과 "나를 기다리는 것" 목록은 화면이 따로 보여 주므로 칸으로 만들지 않는다.',
   'JSON 하나만 출력한다. 형식:',
   '{"title": "작업 이름, 15자 이내",',
   ' "now": "지금 하는 일 한 문장, 40자 이내",',
-  ' "steps": [{"from": 기록 번호, "text": "30자 이내"}],  최신순, 최대 8개. 사소한 기록은 묶고 의미 있는 단계 전환만 남긴다. from은 그 단계를 보여 주는 기록의 번호.',
-  ' "checks": [{"label": "...", "value": "...", "from": 기록 번호}],  기록의 출력에서 확인된 바깥 상태(학습 epoch, 손실값, 원격 세션 상태 등), 최대 4개, 없으면 [].',
-  ' "blocked": ["막힌 것, 실패, 재시도 중인 것"],  없으면 [].',
-  ' "next": "다음에 할 일로 보이는 것, 30자 이내, 모르면 빈 문자열",',
-  ' "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 30자 이내, 아니면 빈 문자열"}',
+  ' "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 30자 이내, 아니면 빈 문자열",',
+  ' "sections": [{"title": "칸 이름, 12자 이내", "lines": [{"text": "40자 이내", "from": 기록 번호 또는 0, "tone": "normal|good|warn|bad|muted"}]}]}',
+  '칸은 지금 작업에 맞게 정한다. 자주 쓰는 칸은 "지나온 단계", "확인한 상태", "막힌 것", "다음"이고, 작업에 따라 "세션별 현황", "실험별 진행"처럼 더하거나 이름을 바꿔도 된다.',
+  '칸은 최대 5개, 칸마다 줄은 최대 8개. 내용 없는 칸은 만들지 않는다. 자리 비운 사이를 보여 주는 단계 칸은 거의 항상 둔다.',
+  '지난번에 쓴 대시보드가 있으면 작업이 크게 바뀌지 않는 한 칸 이름과 순서를 그대로 유지한다. 사용자가 돌아왔을 때 같은 자리를 보게 하기 위해서다.',
+  'from은 그 줄을 보여 주는 기록의 번호다. 시간이 의미 있는 줄(단계, 확인한 상태)에는 꼭 넣고, 아니면 0으로 둔다. 단계는 최신순으로 쓰고 사소한 기록은 묶는다.',
+  'tone은 막힘이나 실패면 bad, 주의가 필요하면 warn, 끝난 것은 good, 덜 중요한 것은 muted, 나머지는 normal.',
   '쉬운 한국어로 쓴다. 명령어나 경로는 꼭 필요할 때만 짧게 쓴다.',
 ].join('\n')
 
@@ -228,15 +231,22 @@ export const register: Register = (on, options) => {
     const title = written?.title || '작업 과정'
     const head = missed > 0 ? `보신 뒤 +${missed}` : ''
 
-    const steps =
-      written !== null && written.steps.length > 0
-        ? written.steps.map(step => ({ at: byId.get(step.from)?.at ?? written.at, text: step.text }))
-        : entries
-            .filter(entry => entry.kind !== 'prompt')
-            .slice(-6)
-            .reverse()
-            .map(entry => ({ at: entry.at, text: entry.text }))
+    // Before the first summary, the raw log stands in for the steps.
+    const sections =
+      written !== null && written.sections.length > 0
+        ? written.sections
+        : [
+            {
+              title: '지나온 단계',
+              lines: entries
+                .filter(entry => entry.kind !== 'prompt')
+                .slice(-6)
+                .reverse()
+                .map(entry => ({ text: entry.text, from: entry.id, tone: 'normal' as const })),
+            },
+          ].filter(section => section.lines.length > 0)
     const waitNote = written?.waiting ?? ''
+    const toneColor = { normal: undefined, good: 'success', warn: 'warning', bad: 'error', muted: undefined } as const
 
     const heading = (text: string) => (
       <Text bold color="claude">
@@ -252,60 +262,53 @@ export const register: Register = (on, options) => {
         </Box>
         <Text>{truncate(`지금  ${written?.now || said || '아직 기록이 없습니다'}`, columns)}</Text>
 
-        <Box flexDirection="column" marginTop={1}>
-          {heading('▸ 나를 기다리는 것')}
-          {waits.length === 0 && waitNote === '' && <Text dimColor>  없음</Text>}
-          {waits.map(item => (
-            <Text color="warning">{truncate(`  ${item.kind === 'question' ? '질문' : '권한 요청'}: ${item.label}  ${ageText(at - item.since)}째`, columns)}</Text>
-          ))}
-          {waitNote !== '' && <Text color="warning">{truncate(`  ${waitNote}`, columns)}</Text>}
-        </Box>
-
-        <Box flexDirection="column" marginTop={1}>
-          {heading('▸ 돌아가는 것')}
-          {runs.length === 0 && <Text dimColor>  없음</Text>}
-          {runs.map(item => {
-            const kind = item.kind === 'agent' ? '서브 에이전트' : item.background ? '백그라운드 셸' : '셸'
-            const age = `  ${ageText(at - item.startedAt)}`
-            return (
-              <Box flexDirection="column">
-                <Box flexDirection="row">
-                  <Text color="suggestion">{truncate(`  ● ${kind}  ${item.label}`, Math.max(8, columns - width(age)))}</Text>
-                  <Text dimColor>{age}</Text>
-                </Box>
-                {item.last !== '' && <Text dimColor>{truncate(`      ${item.last}`, columns)}</Text>}
-              </Box>
-            )
-          })}
-        </Box>
-
-        <Box flexDirection="column" marginTop={1}>
-          {heading(missed > 0 ? '▸ 지나온 단계  ★ 자리 비운 사이' : '▸ 지나온 단계')}
-          {steps.length === 0 && <Text dimColor>  없음</Text>}
-          {steps.map(step => {
-            const mark = seen !== 0 && step.at > seen ? '★' : ' '
-            return <Text>{truncate(`  ${mark} ${pad(ageText(at - step.at) + ' 전', 9)} ${step.text}`, columns)}</Text>
-          })}
-        </Box>
-
-        {written !== null && written.checks.length > 0 && (
+        {(waits.length > 0 || waitNote !== '') && (
           <Box flexDirection="column" marginTop={1}>
-            {heading('▸ 확인한 상태')}
-            {written.checks.map(check => (
-              <Text>{truncate(`  ${check.label}  ${check.value}  (확인 ${ageText(at - (byId.get(check.from)?.at ?? written.at))} 전)`, columns)}</Text>
+            {heading('▸ 나를 기다리는 것')}
+            {waits.map(item => (
+              <Text color="warning">{truncate(`  ${item.kind === 'question' ? '질문' : '권한 요청'}: ${item.label}  ${ageText(at - item.since)}째`, columns)}</Text>
             ))}
+            {waitNote !== '' && <Text color="warning">{truncate(`  ${waitNote}`, columns)}</Text>}
           </Box>
         )}
 
-        <Box flexDirection="column" marginTop={1}>
-          {heading('▸ 막힌 것')}
-          {(written?.blocked ?? []).length === 0 ? <Text dimColor>  없음</Text> : (written?.blocked ?? []).map(text => <Text color="error">{truncate(`  ${text}`, columns)}</Text>)}
-        </Box>
+        {runs.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {heading('▸ 돌아가는 것')}
+            {runs.map(item => {
+              const kind = item.kind === 'agent' ? '서브 에이전트' : item.background ? '백그라운드 셸' : '셸'
+              const age = `  ${ageText(at - item.startedAt)}`
+              return (
+                <Box flexDirection="column">
+                  <Box flexDirection="row">
+                    <Text color="suggestion">{truncate(`  ● ${kind}  ${item.label}`, Math.max(8, columns - width(age)))}</Text>
+                    <Text dimColor>{age}</Text>
+                  </Box>
+                  {item.last !== '' && <Text dimColor>{truncate(`      ${item.last}`, columns)}</Text>}
+                </Box>
+              )
+            })}
+          </Box>
+        )}
 
-        <Box flexDirection="column" marginTop={1}>
-          {heading('▸ 다음')}
-          <Text dimColor={!written?.next}>{truncate(`  ${written?.next || '아직 모름'}`, columns)}</Text>
-        </Box>
+        {sections.map(section => {
+          const marked = section.lines.some(line => seen !== 0 && (byId.get(line.from)?.at ?? 0) > seen)
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              {heading(marked ? `▸ ${section.title}  ★ 자리 비운 사이` : `▸ ${section.title}`)}
+              {section.lines.map(line => {
+                const entry = byId.get(line.from)
+                const mark = entry !== undefined && seen !== 0 && entry.at > seen ? '★ ' : '  '
+                const when = entry === undefined ? '' : `${pad(ageText(at - entry.at) + ' 전', 9)} `
+                return (
+                  <Text color={toneColor[line.tone]} dimColor={line.tone === 'muted'}>
+                    {truncate(`  ${mark}${when}${line.text}`, columns)}
+                  </Text>
+                )
+              })}
+            </Box>
+          )
+        })}
 
         <Box marginTop={1}>
           <Text dimColor>
@@ -444,7 +447,7 @@ export function promptFor(
     said === '' ? '' : `Claude가 알린 지금 단계: ${said}`,
     `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${item.label} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
     `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => item.label).join('; ')}`,
-    previous === null ? '' : `지난번에 쓴 대시보드: ${JSON.stringify({ title: previous.title, now: previous.now, steps: previous.steps, checks: previous.checks, blocked: previous.blocked, next: previous.next, waiting: previous.waiting })}`,
+    previous === null ? '' : `지난번에 쓴 대시보드: ${JSON.stringify({ title: previous.title, now: previous.now, waiting: previous.waiting, sections: previous.sections })}`,
     '기록 (오래된 것부터):',
     ...lines,
   ]
@@ -465,27 +468,26 @@ export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summa
   }
   const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
   const list = (value: unknown) => (Array.isArray(value) ? value : [])
-  const ref = (value: unknown) => (typeof value === 'number' && ids.has(value) ? value : 0)
-  return {
-    title: str(raw.title, 30),
-    now: str(raw.now, 80),
-    steps: list(raw.steps)
-      .map(step => (typeof step === 'object' && step !== null ? (step as Record<string, unknown>) : {}))
-      .map(step => ({ from: ref(step.from), text: str(step.text, 60) }))
-      .filter(step => step.text !== '')
-      .slice(0, 8),
-    checks: list(raw.checks)
-      .map(check => (typeof check === 'object' && check !== null ? (check as Record<string, unknown>) : {}))
-      .map(check => ({ label: str(check.label, 20), value: str(check.value, 30), from: ref(check.from) }))
-      .filter(check => check.label !== '' && check.value !== '')
-      .slice(0, 4),
-    blocked: list(raw.blocked)
-      .map(item => str(item, 60))
-      .filter(item => item !== '')
-      .slice(0, 4),
-    next: str(raw.next, 60),
-    waiting: str(raw.waiting, 60),
-  }
+  const obj = (value: unknown) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {})
+  const tones = ['normal', 'good', 'warn', 'bad', 'muted'] as const
+  const toneOf = (value: unknown) => tones.find(tone => tone === value) ?? 'normal'
+  const sections = list(raw.sections)
+    .map(obj)
+    .map(section => ({
+      title: str(section.title, 24),
+      lines: list(section.lines)
+        .map(line => (typeof line === 'string' ? { text: line } : obj(line)))
+        .map(line => ({
+          text: str(line.text, 80),
+          from: typeof line.from === 'number' && ids.has(line.from) ? line.from : 0,
+          tone: toneOf(line.tone),
+        }))
+        .filter(line => line.text !== '')
+        .slice(0, 8),
+    }))
+    .filter(section => section.title !== '' && section.lines.length > 0)
+    .slice(0, 5)
+  return { title: str(raw.title, 30), now: str(raw.now, 80), waiting: str(raw.waiting, 60), sections }
 }
 
 function inputOf(e: object): Record<string, unknown> {

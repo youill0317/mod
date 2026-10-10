@@ -41,15 +41,25 @@ export type WaitingItem = {
   since: number
 }
 
+/** One line the small model wrote; `from` is the log entry it rests on, 0 for none. */
+export type SummaryLine = {
+  text: string
+  from: number
+  tone: 'normal' | 'good' | 'warn' | 'bad' | 'muted'
+}
+
+/** A section the small model chose for the work at hand. */
+export type SummarySection = {
+  title: string
+  lines: SummaryLine[]
+}
+
 /** What the small model wrote, from the log. */
 export type Summary = {
   title: string
   now: string
-  steps: { from: number; text: string }[]
-  checks: { label: string; value: string; from: number }[]
-  blocked: string[]
-  next: string
   waiting: string
+  sections: SummarySection[]
   /** The last log id this summary covers. */
   covers: number
   at: number
