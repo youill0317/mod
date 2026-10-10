@@ -41,25 +41,23 @@ export type WaitingItem = {
   since: number
 }
 
-/** One line the small model wrote; `from` is the log entry it rests on, 0 for none. */
-export type SummaryLine = {
-  text: string
-  from: number
-  tone: 'normal' | 'good' | 'warn' | 'bad' | 'muted'
-}
+/** A color the small model gives a row or an item. */
+export type Tone = 'normal' | 'good' | 'warn' | 'bad' | 'muted'
 
-/** A section the small model chose for the work at hand. */
-export type SummarySection = {
-  title: string
-  lines: SummaryLine[]
-}
+/** `from` is the log entry a value was seen in, 0 for none: the pane shows how long ago. */
+export type SummaryBlock =
+  | { kind: 'flow'; title: string; steps: { label: string; state: 'done' | 'now' | 'todo' | 'failed' }[] }
+  | { kind: 'table'; title: string; columns: string[]; rows: { cells: string[]; tone: Tone; from: number }[] }
+  | { kind: 'bars'; title: string; items: { label: string; value: number; max: number; note: string; tone: Tone; from: number }[] }
+  | { kind: 'metrics'; title: string; items: { label: string; value: string; tone: Tone; from: number }[] }
+  | { kind: 'list'; title: string; items: { text: string; tone: Tone }[] }
 
 /** What the small model wrote, from the log. */
 export type Summary = {
   title: string
   now: string
   waiting: string
-  sections: SummarySection[]
+  blocks: SummaryBlock[]
   /** The last log id this summary covers. */
   covers: number
   at: number

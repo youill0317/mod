@@ -14,18 +14,20 @@ const DONE = { result: { stdout: 'epoch 3/10 loss=0.51', stderr: '', interrupted
 
 const WRITTEN = JSON.stringify({
   title: 'Colab 학습 재개',
-  now: 'l4a에서 epoch 2 체크포인트로 학습 재개 중',
+  now: '체크포인트를 Kaggle로 옮기는 중',
   waiting: '',
-  sections: [
-    { title: '세션별 현황', lines: [{ text: 'l4a epoch 3/10', from: 2, tone: 'normal' }, { text: 'l4b 종료됨', from: 0, tone: 'bad' }] },
-    { title: '지나온 단계', lines: [{ text: 'Drive에서 체크포인트 확인', from: 1, tone: 'good' }] },
-    { title: '다음', lines: [{ text: 'epoch 3 결과 확인', from: 0, tone: 'normal' }] },
-    { title: '막힌 것', lines: [] },
+  blocks: [
+    { kind: 'flow', title: '', steps: [{ label: '체크포인트 확인', state: 'done' }, { label: 'Kaggle로 이동', state: 'now' }, { label: '학습 재개', state: 'todo' }] },
+    { kind: 'table', title: '세션', columns: ['세션', 'GPU', '상태'], rows: [{ cells: ['l4a', 'L4', '종료'], tone: 'bad', from: 2 }, { cells: ['l4c', 'T4', '대기'], tone: 'muted', from: 0 }] },
+    { kind: 'bars', title: '실험', items: [{ label: 't384_lr1e4', value: 2, max: 10, note: 'AUC 0.871', tone: 'normal', from: 0 }] },
+    { kind: 'metrics', title: '', items: [{ label: 'val AUC', value: '0.871', tone: 'good', from: 0 }, { label: '남은 epoch', value: '8', tone: 'normal', from: 0 }] },
+    { kind: 'list', title: '막힌 것', items: [] },
+    { kind: 'chart', title: '없는 종류' },
   ],
 })
 
 describe('the progress dashboard', () => {
-  test('a running shell shows under what runs, then joins the steps', async ($, on) => {
+  test('a running shell shows under what runs, then joins the recent log', async ($, on) => {
     const clock = mock.clock(on)
     let finish: () => void = () => undefined
     on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (finish = () => resolve(DONE))))
@@ -46,7 +48,7 @@ describe('the progress dashboard', () => {
     await ui.unmount()
   })
 
-  test('a phase signal wakes the model, and the sections it chose are drawn', async ($, on) => {
+  test('a phase signal wakes the model, and the blocks it chose are drawn as a flow, a table, bars and numbers', async ($, on) => {
     const clock = mock.clock(on)
     const asked: string[] = []
     on('model.complete', ($, e) => {
@@ -64,13 +66,21 @@ describe('the progress dashboard', () => {
 
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /Colab 학습 재개/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /지금 {2}l4a에서 epoch 2/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /▸ 세션별 현황/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /전 +l4a epoch 3\/10/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Drive에서 체크포인트 확인/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /epoch 3 결과 확인/ })).toBeDefined()
-    // A section with nothing in it, and the live sections with nothing to show, stay hidden.
-    expect(await ui.find({ type: 'Text', text: /막힌 것/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /지금 {2}체크포인트를 Kaggle로/ })).toBeDefined()
+    // The flow of stages
+    expect(await ui.find({ type: 'Text', text: '✓ 체크포인트 확인' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '● Kaggle로 이동' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '○ 학습 재개' })).toBeDefined()
+    // A table, with how long ago each value was seen
+    expect(await ui.find({ type: 'Text', text: /^세션 +GPU +상태 +확인$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^l4a +L4 +종료 +\d+초 전$/ })).toBeDefined()
+    // A progress bar and the key numbers
+    expect(await ui.find({ type: 'Text', text: /^█+$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /2\/10 {2}AUC 0\.871/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '0.871' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '남은 epoch' })).toBeDefined()
+    // An empty block, an unknown kind, and the live lines with nothing to show stay out.
+    expect(await ui.find({ type: 'Text', text: /막힌 것|없는 종류/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^[◆▶◎↻] / })).toBeUndefined()
     await ui.unmount()
   })
@@ -154,7 +164,7 @@ describe('helpers', () => {
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { title: 't', now: 'n', waiting: '', sections: [{ title: '지나온 단계', lines: [{ text: '확인', from: 1, tone: 'normal' }] }], covers: 1, at: 0 },
+      { title: 't', now: 'n', waiting: '', blocks: [{ kind: 'flow', title: '', steps: [{ label: '확인', state: 'done' }] }], covers: 1, at: 0 },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',
@@ -168,11 +178,11 @@ describe('helpers', () => {
 
   test('the answer is read even around a code fence, and unknown log ids are dropped', () => {
     const written = parseSummary('여기 있습니다\n```json\n' + WRITTEN + '\n```', new Set([1]))
-    expect(written?.now).toContain('학습 재개')
-    expect(written?.sections.map(section => section.title)).toEqual(['세션별 현황', '지나온 단계', '다음'])
-    expect(written?.sections[1]?.lines[0]).toEqual({ text: 'Drive에서 체크포인트 확인', from: 1, tone: 'good' })
+    expect(written?.now).toContain('Kaggle로')
+    expect(written?.blocks.map(block => block.kind)).toEqual(['flow', 'table', 'bars', 'metrics'])
     // A log id the model made up is dropped to 0.
-    expect(written?.sections[0]?.lines[0]?.from).toBe(0)
+    const table = written?.blocks[1]
+    expect(table?.kind === 'table' ? table.rows[0]?.from : -1).toBe(0)
     expect(parseSummary('모르겠습니다', new Set())).toBeUndefined()
   })
 

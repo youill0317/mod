@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { LogEntry, RunningItem, Summary, WaitingItem } from '../types'
+import type { LogEntry, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -37,19 +37,22 @@ const SIGNAL_DESCRIPTION = [
 ].join(' ')
 
 const SYSTEM = [
-  '너는 Claude Code 작업의 진행 대시보드를 쓴다. 사용자가 자리를 비웠다 돌아와도 작업 맥락을 바로 파악하고, 자리에 있을 때도 전체 과정을 통제할 수 있게 돕는 것이 목적이다.',
-  '결과물, 계획, 파일 내용은 쓰지 않는다. 작업이 어떻게 흘러왔고 지금 어디에 있는지만 쓴다.',
-  '"돌아가는 것"과 "나를 기다리는 것" 목록은 화면이 따로 보여 주므로 칸으로 만들지 않는다.',
+  '너는 Claude Code 작업의 진행 대시보드를 쓴다. 사용자가 전체 작업 과정을 한눈에 파악하고 통제할 수 있게 돕는 것이 목적이다.',
+  '결과물, 계획, 파일 내용은 쓰지 않는다. 작업이 어떻게 흘러왔고 지금 어디에 있는지만 보여 준다.',
+  '실행 중인 것과 사용자를 기다리는 것은 화면 맨 위에 따로 나오므로 블록으로 만들지 않는다.',
+  '글보다 도식과 표로 보여 준다. 문장은 최소로 쓴다.',
   'JSON 하나만 출력한다. 형식:',
-  '{"title": "작업 이름, 15자 이내",',
-  ' "now": "지금 하는 일 한 문장, 40자 이내",',
-  ' "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 30자 이내, 아니면 빈 문자열",',
-  ' "sections": [{"title": "칸 이름, 12자 이내", "lines": [{"text": "40자 이내", "from": 기록 번호 또는 0, "tone": "normal|good|warn|bad|muted"}]}]}',
-  '칸은 지금 작업에 맞게 정한다. 자주 쓰는 칸은 "지나온 단계", "확인한 상태", "막힌 것", "다음"이고, 작업에 따라 "세션별 현황", "실험별 진행"처럼 더하거나 이름을 바꿔도 된다.',
-  '칸은 최대 5개, 칸마다 줄은 최대 8개. 내용 없는 칸은 만들지 않는다. 지나온 단계 칸은 거의 항상 둔다.',
-  '지난번에 쓴 대시보드가 있으면 작업이 크게 바뀌지 않는 한 칸 이름과 순서를 그대로 유지한다. 사용자가 돌아왔을 때 같은 자리를 보게 하기 위해서다.',
-  'from은 그 줄을 보여 주는 기록의 번호다. 시간이 의미 있는 줄(단계, 확인한 상태)에는 꼭 넣고, 아니면 0으로 둔다. 단계는 최신순으로 쓰고 사소한 기록은 묶는다.',
-  'tone은 막힘이나 실패면 bad, 주의가 필요하면 warn, 끝난 것은 good, 덜 중요한 것은 muted, 나머지는 normal.',
+  '{"title": "작업 이름, 15자 이내", "now": "지금 하는 일, 30자 이내", "waiting": "Claude가 사용자의 답이나 결정을 기다리면 그 내용 25자 이내, 아니면 빈 문자열", "blocks": [블록...]}',
+  '블록 종류:',
+  '- {"kind": "flow", "title": "", "steps": [{"label": "8자 이내", "state": "done|now|todo|failed"}]}  작업의 큰 단계 흐름. 지난 단계, 지금 단계, 다음 단계를 4~7개로. 거의 항상 첫 블록으로 둔다.',
+  '- {"kind": "table", "title": "6자 이내", "columns": ["열 이름"], "rows": [{"cells": ["짧은 값"], "tone": "...", "from": 기록 번호}]}  여러 대상(세션, 실험, 서브 에이전트, 파일)을 비교할 때. 열 4개 이하, 행 6개 이하, 칸은 12자 이내.',
+  '- {"kind": "bars", "title": "6자 이내", "items": [{"label": "10자 이내", "value": 숫자, "max": 숫자, "note": "10자 이내", "tone": "...", "from": 기록 번호}]}  진행률(epoch, 처리 개수 등).',
+  '- {"kind": "metrics", "title": "", "items": [{"label": "8자 이내", "value": "8자 이내", "tone": "...", "from": 기록 번호}]}  핵심 숫자 2~4개.',
+  '- {"kind": "list", "title": "6자 이내", "items": [{"text": "30자 이내", "tone": "..."}]}  막힌 것처럼 꼭 글이 필요한 것만, 최대 3줄.',
+  '블록은 최대 5개. 작업에 맞는 것만 고르고 내용 없는 블록은 만들지 않는다.',
+  '지난번에 쓴 대시보드가 있으면 작업이 크게 바뀌지 않는 한 블록 종류와 순서를 그대로 유지한다.',
+  'from은 그 값을 확인한 기록의 번호다. 바깥 상태(학습 epoch, 세션 상태 등)에는 꼭 넣고, 아니면 0으로 둔다.',
+  'tone은 normal, good(끝남), warn(주의), bad(실패, 막힘), muted(덜 중요) 중 하나.',
   '쉬운 한국어로 쓴다. 명령어나 경로는 꼭 필요할 때만 짧게 쓴다.',
 ].join('\n')
 
@@ -232,22 +235,15 @@ export const register: Register = (on, options) => {
     const unwritten = entries.filter(entry => entry.id > (written?.covers ?? 0)).length
     const title = written?.title || '작업 과정'
 
-    // Before the first summary, the raw log stands in for the steps.
-    const sections =
-      written !== null && written.sections.length > 0
-        ? written.sections
-        : [
-            {
-              title: '지나온 단계',
-              lines: entries
-                .filter(entry => entry.kind !== 'prompt')
-                .slice(-6)
-                .reverse()
-                .map(entry => ({ text: entry.text, from: entry.id, tone: 'normal' as const })),
-            },
-          ].filter(section => section.lines.length > 0)
+    // Before the first summary, the latest log entries stand in as a table.
+    const recent = entries.filter(entry => entry.kind !== 'prompt').slice(-5).reverse()
+    const blocks: SummaryBlock[] =
+      written !== null && written.blocks.length > 0
+        ? written.blocks
+        : recent.length === 0
+          ? []
+          : [{ kind: 'table', title: '최근 기록', columns: ['일'], rows: recent.map(entry => ({ cells: [entry.text], tone: 'normal' as const, from: entry.id })) }]
     const waitNote = written?.waiting ?? ''
-    const toneColor = { normal: undefined, good: 'success', warn: 'warning', bad: 'error', muted: undefined } as const
 
     // What waits on the person and what runs, each line led by its symbol.
     const live = [
@@ -288,20 +284,10 @@ export const register: Register = (on, options) => {
           </Box>
         )}
 
-        {sections.map(section => (
+        {blocks.map(block => (
           <Box flexDirection="column" marginTop={1}>
-            <Text bold color="claude">
-              {truncate(`▸ ${section.title}`, columns)}
-            </Text>
-            {section.lines.map(line => {
-              const entry = byId.get(line.from)
-              const when = entry === undefined ? '' : `${pad(ageText(at - entry.at) + ' 전', 9)} `
-              return (
-                <Text color={toneColor[line.tone]} dimColor={line.tone === 'muted'}>
-                  {truncate(`  ${when}${line.text}`, columns)}
-                </Text>
-              )
-            })}
+            {block.title !== '' && <Text dimColor bold>{truncate(block.title, columns)}</Text>}
+            {drawBlock(Box, Text, block, columns, byId, at)}
           </Box>
         ))}
 
@@ -311,6 +297,141 @@ export const register: Register = (on, options) => {
       </Box>
     )
   })
+}
+
+// ── Drawing the blocks ──────────────────────────────────────────────────────
+
+// An element of the surface's table, drawn through the JSX factory.
+type Draw = Parameters<typeof h>[0]
+type Node = ReturnType<typeof h>
+
+const TONE_COLOR: Record<Tone, string | undefined> = { normal: undefined, good: 'success', warn: 'warning', bad: 'error', muted: undefined }
+
+function drawBlock(BoxEl: unknown, TextEl: unknown, block: SummaryBlock, columns: number, byId: Map<number, LogEntry>, at: number): Node {
+  const Box = BoxEl as Draw
+  const Text = TextEl as Draw
+  const ago = (from: number) => {
+    const entry = byId.get(from)
+    return entry === undefined ? '' : `${ageText(at - entry.at)} 전`
+  }
+  switch (block.kind) {
+    case 'flow':
+      return drawFlow(Box, Text, block.steps, columns)
+    case 'table':
+      return drawTable(Box, Text, block.columns, block.rows.map(row => ({ ...row, age: ago(row.from) })), columns)
+    case 'bars':
+      return drawBars(Box, Text, block.items.map(item => ({ ...item, age: ago(item.from) })), columns)
+    case 'metrics':
+      return drawMetrics(Box, Text, block.items.map(item => ({ ...item, age: ago(item.from) })), columns)
+    case 'list':
+      return h(Box, { flexDirection: 'column' }, ...block.items.map(item => h(Text, { color: TONE_COLOR[item.tone], dimColor: item.tone === 'muted' }, truncate(`• ${item.text}`, columns))))
+  }
+}
+
+// ✓ 데이터 준비 ─ ● 체크포인트 이동 ─ ○ 학습 재개, wrapped to the pane.
+function drawFlow(Box: Draw, Text: Draw, steps: readonly { label: string; state: 'done' | 'now' | 'todo' | 'failed' }[], columns: number): Node {
+  const look = {
+    done: { symbol: '✓', props: { color: 'success' } },
+    now: { symbol: '●', props: { color: 'suggestion', bold: true } },
+    todo: { symbol: '○', props: { dimColor: true } },
+    failed: { symbol: '✗', props: { color: 'error' } },
+  } as const
+  const lines: Node[][] = [[]]
+  let used = 0
+  steps.forEach((step, i) => {
+    const text = truncate(`${look[step.state].symbol} ${step.label}`, columns)
+    const join = i === 0 ? '' : ' ─ '
+    if (used > 0 && used + width(join) + width(text) > columns) {
+      lines.push([])
+      used = 0
+    }
+    const line = lines[lines.length - 1]!
+    if (used > 0) line.push(h(Text, { dimColor: true }, join))
+    line.push(h(Text, look[step.state].props, text))
+    used += (used > 0 ? width(join) : 0) + width(text)
+  })
+  return h(Box, { flexDirection: 'column' }, ...lines.map(parts => h(Box, { flexDirection: 'row' }, ...parts)))
+}
+
+function drawTable(Box: Draw, Text: Draw, head: readonly string[], rows: readonly { cells: readonly string[]; tone: Tone; age: string }[], columns: number): Node {
+  const withAge = rows.some(row => row.age !== '')
+  const titles = withAge ? [...head, '확인'] : [...head]
+  const cells = rows.map(row => {
+    const filled = head.map((_, c) => row.cells[c] ?? '')
+    return withAge ? [...filled, row.age] : filled
+  })
+  const gap = 2
+  const widths = titles.map((title, c) => Math.max(width(title), ...cells.map(row => width(row[c] ?? ''))))
+  // Narrow the widest column until the table fits the pane.
+  while (widths.reduce((a, b) => a + b, 0) + gap * (widths.length - 1) > columns) {
+    const widest = widths.indexOf(Math.max(...widths))
+    if (widths[widest]! <= 4) break
+    widths[widest] = widths[widest]! - 1
+  }
+  const line = (row: readonly string[]) => row.map((cell, c) => pad(truncate(cell, widths[c]!), widths[c]!)).join(' '.repeat(gap)).trimEnd()
+  const total = Math.min(columns, widths.reduce((a, b) => a + b, 0) + gap * (widths.length - 1))
+  return h(
+    Box,
+    { flexDirection: 'column' },
+    h(Text, { dimColor: true }, line(titles)),
+    h(Text, { dimColor: true }, '─'.repeat(total)),
+    ...cells.map((row, r) => h(Text, { color: TONE_COLOR[rows[r]!.tone], dimColor: rows[r]!.tone === 'muted' }, line(row))),
+  )
+}
+
+// epoch  ██████░░░░░░  2/10  t384_lr1e4
+function drawBars(Box: Draw, Text: Draw, items: readonly { label: string; value: number; max: number; note: string; tone: Tone; age: string }[], columns: number): Node {
+  const labelWidth = Math.min(14, Math.max(...items.map(item => width(item.label))))
+  const tails = items.map(item => ` ${trimNumber(item.value)}/${trimNumber(item.max)}${item.note === '' ? '' : `  ${item.note}`}${item.age === '' ? '' : `  ${item.age}`}`)
+  const tailWidth = Math.max(...tails.map(width))
+  const barWidth = Math.max(6, Math.min(24, columns - labelWidth - 2 - tailWidth))
+  return h(
+    Box,
+    { flexDirection: 'column' },
+    ...items.map((item, i) => {
+      const filled = Math.round(Math.min(1, Math.max(0, item.value / item.max)) * barWidth)
+      const color = item.tone === 'normal' ? 'suggestion' : TONE_COLOR[item.tone] ?? 'subtle'
+      return h(
+        Box,
+        { flexDirection: 'row' },
+        h(Text, { dimColor: true }, `${pad(truncate(item.label, labelWidth), labelWidth)}  `),
+        h(Text, { color }, '█'.repeat(filled)),
+        h(Text, { dimColor: true }, '░'.repeat(barWidth - filled)),
+        h(Text, {}, truncate(tails[i]!, Math.max(0, columns - labelWidth - 2 - barWidth))),
+      )
+    }),
+  )
+}
+
+// Boxed key numbers side by side, two to a row when the pane is narrow.
+function drawMetrics(Box: Draw, Text: Draw, items: readonly { label: string; value: string; tone: Tone; age: string }[], columns: number): Node {
+  const perRow = items.length <= 2 || Math.floor((columns - (items.length - 1)) / items.length) >= 14 ? items.length : 2
+  const tileWidth = Math.max(10, Math.floor((columns - (perRow - 1)) / perRow))
+  const rows: (typeof items)[] = []
+  for (let i = 0; i < items.length; i += perRow) rows.push(items.slice(i, i + perRow))
+  return h(
+    Box,
+    { flexDirection: 'column' },
+    ...rows.map(row =>
+      h(
+        Box,
+        { flexDirection: 'row', gap: 1 },
+        ...row.map(item =>
+          h(
+            Box,
+            { flexDirection: 'column', borderStyle: 'round', borderColor: 'subtle', width: tileWidth, paddingX: 1 },
+            h(Text, { bold: true, color: TONE_COLOR[item.tone] }, truncate(item.value, tileWidth - 4)),
+            h(Text, { dimColor: true }, truncate(item.age === '' ? item.label : `${item.label} · ${item.age}`, tileWidth - 4)),
+          ),
+        ),
+      ),
+    ),
+  )
+}
+
+function trimNumber(value: number): string {
+  if (Number.isInteger(value)) return String(value)
+  return String(Number(value.toPrecision(3)))
 }
 
 // ── Recording and waking the model ──────────────────────────────────────────
@@ -437,7 +558,7 @@ export function promptFor(
     said === '' ? '' : `Claude가 알린 지금 단계: ${said}`,
     `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${item.label} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
     `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => item.label).join('; ')}`,
-    previous === null ? '' : `지난번에 쓴 대시보드: ${JSON.stringify({ title: previous.title, now: previous.now, waiting: previous.waiting, sections: previous.sections })}`,
+    previous === null ? '' : `지난번에 쓴 대시보드: ${JSON.stringify({ title: previous.title, now: previous.now, waiting: previous.waiting, blocks: previous.blocks })}`,
     '기록 (오래된 것부터):',
     ...lines,
   ]
@@ -456,29 +577,71 @@ export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summa
   } catch {
     return undefined
   }
-  const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
-  const list = (value: unknown) => (Array.isArray(value) ? value : [])
-  const obj = (value: unknown) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {})
-  const tones = ['normal', 'good', 'warn', 'bad', 'muted'] as const
-  const toneOf = (value: unknown) => tones.find(tone => tone === value) ?? 'normal'
-  const sections = list(raw.sections)
+  const blocks = list(raw.blocks)
     .map(obj)
-    .map(section => ({
-      title: str(section.title, 24),
-      lines: list(section.lines)
-        .map(line => (typeof line === 'string' ? { text: line } : obj(line)))
-        .map(line => ({
-          text: str(line.text, 80),
-          from: typeof line.from === 'number' && ids.has(line.from) ? line.from : 0,
-          tone: toneOf(line.tone),
-        }))
-        .filter(line => line.text !== '')
-        .slice(0, 8),
-    }))
-    .filter(section => section.title !== '' && section.lines.length > 0)
+    .map(block => parseBlock(block, ids))
+    .filter((block): block is SummaryBlock => block !== undefined)
     .slice(0, 5)
-  return { title: str(raw.title, 30), now: str(raw.now, 80), waiting: str(raw.waiting, 60), sections }
+  return { title: str(raw.title, 30), now: str(raw.now, 60), waiting: str(raw.waiting, 50), blocks }
 }
+
+function parseBlock(block: Record<string, unknown>, ids: ReadonlySet<number>): SummaryBlock | undefined {
+  const title = str(block.title, 16)
+  const from = (value: unknown) => (typeof value === 'number' && ids.has(value) ? value : 0)
+  switch (block.kind) {
+    case 'flow': {
+      const states = ['done', 'now', 'todo', 'failed'] as const
+      const steps = list(block.steps)
+        .map(obj)
+        .map(step => ({ label: str(step.label, 18), state: states.find(state => state === step.state) ?? 'todo' }))
+        .filter(step => step.label !== '')
+        .slice(0, 8)
+      return steps.length === 0 ? undefined : { kind: 'flow', title, steps }
+    }
+    case 'table': {
+      const columns = list(block.columns).map(column => str(column, 12)).filter(column => column !== '').slice(0, 5)
+      const rows = list(block.rows)
+        .map(row => (Array.isArray(row) ? { cells: row } : obj(row)))
+        .map(row => ({ cells: list(row.cells).map(cell => str(typeof cell === 'number' ? String(cell) : cell, 20)).slice(0, columns.length), tone: toneOf(row.tone), from: from(row.from) }))
+        .filter(row => row.cells.some(cell => cell !== ''))
+        .slice(0, 8)
+      return columns.length === 0 || rows.length === 0 ? undefined : { kind: 'table', title, columns, rows }
+    }
+    case 'bars': {
+      const items = list(block.items)
+        .map(obj)
+        .map(item => ({ label: str(item.label, 14), value: num(item.value), max: num(item.max), note: str(item.note, 14), tone: toneOf(item.tone), from: from(item.from) }))
+        .filter(item => item.label !== '' && item.max > 0)
+        .slice(0, 6)
+      return items.length === 0 ? undefined : { kind: 'bars', title, items }
+    }
+    case 'metrics': {
+      const items = list(block.items)
+        .map(obj)
+        .map(item => ({ label: str(item.label, 12), value: str(typeof item.value === 'number' ? String(item.value) : item.value, 12), tone: toneOf(item.tone), from: from(item.from) }))
+        .filter(item => item.label !== '' && item.value !== '')
+        .slice(0, 4)
+      return items.length === 0 ? undefined : { kind: 'metrics', title, items }
+    }
+    case 'list': {
+      const items = list(block.items)
+        .map(item => (typeof item === 'string' ? { text: item } : obj(item)))
+        .map(item => ({ text: str(item.text, 60), tone: toneOf(item.tone) }))
+        .filter(item => item.text !== '')
+        .slice(0, 3)
+      return items.length === 0 ? undefined : { kind: 'list', title, items }
+    }
+    default:
+      return undefined
+  }
+}
+
+const TONES = ['normal', 'good', 'warn', 'bad', 'muted'] as const
+const toneOf = (value: unknown): Tone => TONES.find(tone => tone === value) ?? 'normal'
+const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
+const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : Number(value) || 0)
+const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
+const obj = (value: unknown) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {})
 
 function inputOf(e: object): Record<string, unknown> {
   const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, ...rest } = e as Record<string, unknown>
