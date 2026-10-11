@@ -130,11 +130,11 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: SIGNAL_ID }, async ($, e) => {
     const input = e as unknown as { phase?: unknown; note?: unknown }
-    const said = typeof input.phase === 'string' ? input.phase.trim() : ''
-    const note = typeof input.note === 'string' ? input.note.trim() : ''
+    const said = typeof input.phase === 'string' ? excerpt(input.phase, 60) : ''
+    const note = typeof input.note === 'string' ? excerpt(input.note, 80) : ''
     if (said !== '') await update($, phase, () => said)
     // What Claude says is blocked or the person must decide waits on them until they answer.
-    if (note !== '') await update($, ask, () => excerpt(note, 80))
+    if (note !== '') await update($, ask, () => note)
     await record($, 'signal', note === '' ? said : `${said} (${note})`)
     return { result: '대시보드에 기록했습니다.' }
   })
@@ -306,7 +306,8 @@ export const register: Register = (on, options) => {
       (written?.blocks ?? [])
         .map(block => (block.kind === 'graph' ? { ...block, nodes: fitGraph(clipNodes(block.nodes, columns), columns, room) } : block))
         .map(block => ({ block, rows: blockRows(block, columns, byId, at) })),
-      room + (topRows > 0 ? 1 : 0),
+      // Each block counts the row above it; with nothing above the first, that row is free.
+      room + 1,
     )
 
     return (
@@ -399,7 +400,8 @@ export function fitGraph(nodes: readonly GraphNode[], columns: number, room: num
   const foldable = settled === -1 ? bare.length - 1 : settled
   let fitted = bare
   for (let folded = 2; folded <= foldable && graphHeight(fitted, columns) > room; folded++) {
-    const fold: GraphNode = { label: '…', state: 'done', note: `${folded}단계`, branches: [], from: bare[0]!.from }
+    const failed = bare.slice(0, folded).filter(node => node.state === 'failed').length
+    const fold: GraphNode = { label: '…', state: failed > 0 ? 'failed' : 'done', note: failed > 0 ? `${folded}단계, 실패 ${failed}` : `${folded}단계`, branches: [], from: bare[0]!.from }
     fitted = [fold, ...bare.slice(folded)]
   }
   return fitted
@@ -542,7 +544,7 @@ export function graphRows(widths: readonly number[], room: number): number[][] {
 
 /**
  * Each stage's start and length from the log entries the stages began at: a
- * stage lasts until the next one begins, the last until now. A start the model
+ * stage lasts until the next one begins, the last until now (or, when it is no longer current, until the latest log entry). A start the model
  * cited out of order is held at the one before, and a stage whose entry is
  * gone from the log is left out.
  */
@@ -553,7 +555,9 @@ export function spans(items: readonly { label: string; state: NodeState; from: n
     if (entry === undefined) continue
     started.push({ label: item.label, state: item.state, start: Math.max(entry.at, started[started.length - 1]?.start ?? entry.at) })
   }
-  return started.map((item, i) => ({ ...item, end: Math.max(item.start, started[i + 1]?.start ?? at) }))
+  // A last stage that is not current ended with the latest thing logged, not now.
+  const logged = Math.max(0, ...[...byId.values()].map(entry => entry.at))
+  return started.map((item, i) => ({ ...item, end: Math.max(item.start, started[i + 1]?.start ?? (item.state === 'now' ? at : Math.min(at, logged))) }))
 }
 
 /**
@@ -879,7 +883,7 @@ const TONES = ['normal', 'good', 'warn', 'bad'] as const
 const STATES = ['done', 'now', 'todo', 'failed', 'wait'] as const
 const stateOf = (value: unknown): NodeState => STATES.find(state => state === value) ?? 'todo'
 const toneOf = (value: unknown): Tone => TONES.find(tone => tone === value) ?? 'normal'
-const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
+const str = (value: unknown, max: number) => (typeof value === 'string' ? excerpt(value, max) : '')
 const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : Number(value) || 0)
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
 const obj = (value: unknown) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {})

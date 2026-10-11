@@ -152,7 +152,7 @@ describe('the progress dashboard', () => {
     mock.clock(on)
     on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
     on('turn.complete', () => ({ text: '' }))
-    on('tool.call', { tool: 'Grep' }, () => ({ result: '' }))
+    on('tool.call', { tool: 'Grep' as never }, () => ({ result: '' }))
 
     await $.agent.spawn({
       tool_use_id: 't1',
@@ -428,6 +428,31 @@ describe('helpers', () => {
       { label: '배포', state: 'todo' },
     ] as const)
     expect(steps.map(step => step.label)).toEqual(['빌드', '측정', '이미지', '배포'])
+  })
+
+  test('line breaks from the model never reach a label or a note', () => {
+    const written = parseSummary('{"now":"a\\nb","blocks":[{"kind":"graph","nodes":[{"label":"빌드\\n단계","state":"now","note":"1\\n\\n2","from":1}]}]}', new Set([1]))
+    expect(written?.now).toBe('a b')
+    const node = (written?.blocks[0] as { nodes: { label: string; note: string }[] }).nodes[0]!
+    expect([node.label, node.note]).toEqual(['빌드 단계', '1 2'])
+  })
+
+  test('a finished last stage ends at the latest log entry, not now', () => {
+    const byId = new Map([[1, { at: 0 }], [2, { at: 60_000 }]])
+    const items = [{ label: '빌드', state: 'done' as const, from: 1 }, { label: '배포', state: 'done' as const, from: 2 }]
+    expect(spans(items, byId, 3 * 3600_000).map(row => row.end)).toEqual([60_000, 60_000])
+  })
+
+  test('a fold that covers a failed stage shows it', () => {
+    const node = (label: string, state: 'done' | 'failed' | 'now') => ({ label, state, note: '12쪽', branches: [], from: 0 })
+    const nodes = [node('준비', 'done'), node('빌드', 'failed'), node('검사', 'done'), node('최적화', 'now')]
+    const fold = fitGraph(nodes, 34, 6)[0]!
+    expect([fold.state, fold.note]).toEqual(['failed', '3단계, 실패 1'])
+  })
+
+  test('the first diagram under no top lines uses the row it does not draw', () => {
+    // Nine and two rows with nothing above: only the second's margin is drawn, so 9 + 1 + 2 = 12 fit.
+    expect(fitBlocks([{ block: 'graph', rows: 9 }, { block: 'bars', rows: 2 }], 12 + 1)).toEqual(['graph', 'bars'])
   })
 
   test('two spellings of one input compare equal', () => {
