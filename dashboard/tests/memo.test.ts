@@ -69,6 +69,87 @@ describe('the memo beside the spinner', () => {
     await $.ui.render(spinner('main'))
     expect(drawn.at(-1)).toBe('…')
   })
+
+  test('a subagent\'s spinner shows only its own memo, even before it runs a command', async ($, on) => {
+    const clock = mock.clock(on)
+    on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('model.complete', () => new Promise(() => undefined))
+
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    await $.agent.spawn({
+      tool_use_id: 't1',
+      prompt: '테스트 고치기',
+      description: '테스트 고치기',
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'opus',
+      background: true,
+      fork: false,
+    } as never)
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests.' })
+    await clock.advance(0)
+    await $.ui.render(spinner('a1'))
+    expect(drawn.at(-1)).toBe('…')
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Run tests')
+  })
+
+  test('a turn that ends clears the memos of its own loop only', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('model.complete', () => new Promise(() => undefined))
+    on('turn.complete', () => ({ text: '' }))
+
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests.' })
+    void $.tool.call({ tool: 'Bash', command: 'npm run lint', description: 'Lint.', agentId: 'a1' } as never)
+    await clock.advance(0)
+
+    await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' } as never)
+    await $.ui.render(spinner('a1'))
+    expect(drawn.at(-1)).toBe('…')
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Run tests')
+
+    await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'y', reason: 'answer' } as never)
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('…')
+  })
+
+  test('a new session starts with no memos', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('model.complete', () => new Promise(() => undefined))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('command.register', ($, e) => ({ value: { command: e.name } }))
+    on('tool.register', ($, e) => ({ value: { tool: e.name } }))
+
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests.' })
+    await clock.advance(0)
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Run tests')
+
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('…')
+  })
 })
 
 describe('helpers', () => {
