@@ -3,7 +3,7 @@ import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { GraphNode, LogEntry, NodeState, PaneSize, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
 import { register as memo, withSubagent } from './memo'
-import { backoffMs, isUnavailable, mask, truncate, width } from './text'
+import { ageText, backoffMs, isUnavailable, mask, truncate, width } from './text'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -17,10 +17,11 @@ const phase = atom({ plugin: 'dashboard', key: 'phase' } as const, '')
 const ask = atom({ plugin: 'dashboard', key: 'ask' } as const, '')
 const now = atom({ plugin: 'dashboard', key: 'now' } as const, 0)
 const pane = atom({ plugin: 'dashboard', key: 'pane' } as const, null)
-// The memo's values (memo.ts), for the events hooked here for both views.
+// The memo's values (memo.tsx), for the events hooked here for both views.
 const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
 const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
 const interactive = atom({ plugin: 'dashboard', key: 'interactive' } as const, true)
+const moved = atom({ plugin: 'dashboard', key: 'moved' } as const, [])
 
 // The symbols that lead the lines at the top: the work now, what waits on the person, what runs.
 const CURRENT = '●'
@@ -76,7 +77,7 @@ let seen = ''
 // Calls in flight, by loop (null for the main one), to tell which one a permission dialog is for.
 const pending = new Map<string, { tool: string; key: string; agentId: string | null }>()
 
-// One mod, two views of the work: the memo beside the spinner (memo.ts), and
+// One mod, two views of the work: the memo beside the spinner (memo.tsx), and
 // this /dashboard pane. An event both follow is hooked once, here: a mod has one
 // hook per event without a matcher, and `$` never crosses an import.
 export const register: Register = (on, options) => {
@@ -111,6 +112,7 @@ export const register: Register = (on, options) => {
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
     await update($, waiting, () => [])
     await update($, shells, () => [])
+    await update($, moved, () => [])
     await update($, interactive, () => e.isInteractive)
     $.clock.every(TICK_MS, () => tick($))
     return next(e)
@@ -262,6 +264,8 @@ export const register: Register = (on, options) => {
       await record($, 'prompt', `사용자 요청: ${excerpt(e.text, 200)}`)
     } else if (e.origin.kind === 'task-notification') {
       const text = e.text
+      // A shell that moved to the background mid-run is done: the band above the prompt lets it go.
+      await update($, moved, list => list.filter(one => !text.includes(one.taskId)))
       const ended = (await read($, running)).filter(item => item.taskId !== null && text.includes(item.taskId))
       if (ended.length > 0) {
         await update($, running, list => list.filter(item => !ended.some(one => one.id === item.id)))
@@ -968,14 +972,6 @@ export function stableKey(value: unknown): string {
 
 function excerpt(text: string, max: number): string {
   return truncate(text.replace(/\s+/g, ' ').trim(), max)
-}
-
-export function ageText(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000))
-  if (seconds < 60) return `${seconds}초`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}분`
-  return minutes % 60 === 0 ? `${minutes / 60}시간` : `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
 }
 
 function pad(text: string, size: number): string {

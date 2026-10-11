@@ -62,3 +62,12 @@ function isWide(cp: number): boolean {
     (cp >= 0x20000 && cp <= 0x3fffd)
   )
 }
+
+// How long, in Korean: 40초, 3분, 2시간 5분.
+export function ageText(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}초`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}분`
+  return minutes % 60 === 0 ? `${minutes / 60}시간` : `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
+}

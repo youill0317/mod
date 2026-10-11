@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { RunningShell } from '../types'
-import { backoffMs, isUnavailable, mask, truncate, width } from './text'
+import type { MovedShell, RunningShell } from '../types'
+import { ageText, backoffMs, isUnavailable, mask, truncate, width } from './text'
 
 // The memo beside the spinner. Its session.start, agent.spawn and turn.complete
 // work is done in register.tsx, which hooks those events for both views.
@@ -14,6 +14,10 @@ const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
 // Whether a person is at the prompt (register.tsx writes it at session.start):
 // a `-p` run or the SDK draws no spinner, so it gets no memo.
 const interactive = atom({ plugin: 'dashboard', key: 'interactive' } as const, true)
+// The main Claude's shells that moved to the background mid-run and still run
+// (register.tsx lets one go when its notification arrives), and the band's clock.
+const moved = atom({ plugin: 'dashboard', key: 'moved' } as const, [])
+const movedNow = atom({ plugin: 'dashboard', key: 'movedNow' } as const, 0)
 
 // The spinner line keeps this much room for what the engine draws after the
 // memo: the icon, the ellipsis and "(7m 45s · ↓ 3.2k tokens · esc to interrupt)".
@@ -21,6 +25,8 @@ const RESERVED_COLUMNS = 52
 const CACHE_SIZE = 200
 // A command that ends sooner than this gets no memo: it would end before the memo came.
 const MEMO_DELAY_MS = 1_500
+// How often the time beside a moved shell is brought up to date.
+const BAND_TICK_MS = 10_000
 
 const SYSTEM = [
   '터미널 명령이 지금 무엇을 하는지 개발자가 아닌 사람에게 알려 주는 아주 짧은 메모를 쓴다.',
@@ -39,6 +45,8 @@ let fallback: string | undefined
 // Failed calls in a row, and until when the model is left alone after them.
 let failures = 0
 let pausedUntil = 0
+// The band's clock while a moved shell runs.
+let ticker: { cancel: () => void } | undefined
 
 export const register: Register = (on, options) => {
   const preferred = typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku'
@@ -50,6 +58,7 @@ export const register: Register = (on, options) => {
     const agentId = e.agentId ?? null
     if (agentId !== null) await rememberSubagent($, agentId)
 
+    const startedAt = await $.clock.now()
     const known = memos.get(e.command)
     const shell: RunningShell = { id, agentId, memo: known ?? cleanDescription(e.description) }
     await update($, shells, list => [...list.filter(one => one.id !== id), shell])
@@ -63,18 +72,48 @@ export const register: Register = (on, options) => {
               if (memo === undefined) return
               remember(e.command, memo)
               await update($, shells, list => list.map(one => (one.id === id ? { ...one, memo } : one)))
+              await update($, moved, list => list.map(one => (one.id === id ? { ...one, memo } : one)))
             } catch {
               // No memo this time: Claude's description stays.
             }
           })
         : undefined
 
+    let ran: ToolCallResult | undefined
     try {
-      return await next(e)
+      ran = await next(e)
+      return ran
     } finally {
-      timer?.cancel()
+      // Moved to the background mid-run (a message sent, or ctrl+b): it still runs, so
+      // the main Claude's keeps its memo, and the memo still on its way, above the prompt.
+      const taskId = movedTaskId(ran)
+      const memo = (await read($, shells)).find(one => one.id === id)?.memo ?? shell.memo
       await update($, shells, list => list.filter(one => one.id !== id))
+      if (taskId !== null && agentId === null) {
+        const one: MovedShell = { id, taskId, memo, since: startedAt }
+        await update($, moved, list => [...list.filter(other => other.id !== id), one])
+        ticker ??= $.clock.every(BAND_TICK_MS, () => tick($))
+      } else {
+        timer?.cancel()
+      }
     }
+  })
+
+  // Above the prompt while Claude rests: a command it ran moved to the background
+  // mid-run, still runs, and shows nowhere else, so this says what it is doing.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.isWorking || e.props.hasSurvey) return next(e)
+    const list = await read($, moved)
+    if (list.length === 0) return next(e)
+    const at = Math.max(await read($, movedNow), await $.clock.now())
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {list.map(one => (
+          <Text dimColor>{truncate(`↻ ${one.memo || '셸 명령 실행 중'} · ${ageText(at - one.since)}`, e.props.bodyColumns)}</Text>
+        ))}
+      </Box>
+    )
   })
 
   // Beside the engine's own words: "✻ Sauteing… · 테스트 실행 중 (12s · …)".
@@ -92,6 +131,23 @@ export const register: Register = (on, options) => {
 
     return next({ ...e, props: { ...e.props, suffix: `${e.props.suffix} · ${memo}` } })
   })
+}
+
+// The band's clock runs while a moved shell does, and stops after the last one.
+async function tick($: EngineInterface) {
+  if ((await read($, moved)).length === 0) {
+    ticker?.cancel()
+    ticker = undefined
+    return
+  }
+  const at = await $.clock.now()
+  await update($, movedNow, () => at)
+}
+
+// The background task a foreground shell moved to, or null when it ended in the foreground.
+function movedTaskId(ran: ToolCallResult | undefined): string | null {
+  const result = (ran?.result ?? {}) as { backgroundTaskId?: unknown }
+  return typeof result.backgroundTaskId === 'string' ? result.backgroundTaskId : null
 }
 
 function remember(command: string, memo: string) {
