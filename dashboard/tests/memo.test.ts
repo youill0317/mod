@@ -94,6 +94,29 @@ describe('helpers', () => {
     expect(masked).toContain('KAGGLE_API_TOKEN=***')
   })
 
+  test('common secret shapes in URLs, flags, headers and env names are hidden', () => {
+    const hidden: [string, string][] = [
+      ['psql postgres://admin:hunter2@db/app', 'hunter2'],
+      ['clone https://oauth2:glpat-xxx@gitlab.com/a/b', 'glpat-xxx'],
+      ['curl -u admin:hunter2 https://x', 'hunter2'],
+      ['mysql -u root -phunter2 app', 'hunter2'],
+      ['sshpass -p hunter2 ssh host', 'hunter2'],
+      ['curl -H "X-Api-Key: abc999" https://x', 'abc999'],
+      ['curl -H "Authorization: Basic dXNlcjpwdw" https://x', 'dXNlcjpwdw'],
+      ['curl -H "Authorization: token ghx12" https://x', 'ghx12'],
+      ['DB_PASS=hunter2 ./run', 'hunter2'],
+      ['PRIVATE_KEY=zzz111 ./run', 'zzz111'],
+      ['OPENAI_KEY=zzz111 ./run', 'zzz111'],
+      ['secret wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY end', 'wJalrXUtnFEMI'],
+    ]
+    for (const [input, secret] of hidden) expect(mask(input)).not.toContain(secret)
+  })
+
+  test('ordinary commands are left alone', () => {
+    for (const input of ['push -u origin main', 'mysql -P 3306 -h db app', 'ls /home/user/project/src/components', 'npm run build --port 80'])
+      expect(mask(input)).toBe(input)
+  })
+
   test('answers and descriptions are cleaned to one short line', () => {
     expect(cleanMemo('\n- "테스트 실행 중."\n다른 줄')).toBe('테스트 실행 중')
     expect(cleanDescription('Push kernel to Kaggle.\nmore')).toBe('Push kernel to Kaggle')

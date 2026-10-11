@@ -232,6 +232,28 @@ describe('the progress dashboard', () => {
     const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
     expect(verdict.decision).toBe('allow')
   })
+
+  test('secrets in a prompt, a note or a step label never reach the model', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      if (e.prompt.includes('기록 (오래된 것부터):')) asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+
+    await $.prompt.submit({ text: 'DB_PASS=hunter2 로 접속해줘', origin: { kind: 'composer' } } as never)
+    void $.tool.call({ tool: 'Bash', command: 'true', description: 'deploy with API_TOKEN=abc123xyz' })
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '배포', note: 'postgres://admin:s3cr3tpw@db 확인' })
+    await clock.advance(2_000)
+
+    expect(asked.length).toBeGreaterThan(0)
+    for (const prompt of asked) {
+      for (const secret of ['hunter2', 'abc123xyz', 's3cr3tpw']) expect(prompt).not.toContain(secret)
+    }
+  })
 })
 
 describe('helpers', () => {
