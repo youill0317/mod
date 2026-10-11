@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { cleanDescription, cleanMemo, fit, mask, width } from '../hooks/register'
+import { cleanDescription, cleanMemo, fit } from '../hooks/memo'
+import { mask, width } from '../hooks/text'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const ENGINE = { type: 'engine', ref: 0 } as const

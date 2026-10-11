@@ -2,11 +2,15 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { RunningShell } from '../types'
+import { mask, truncate, width } from './text'
+
+// The memo beside the spinner. Its session.start, agent.spawn and turn.complete
+// work is done in register.tsx, which hooks those events for both views.
 
 // What runs now, per loop: the main Claude (agentId null) or a subagent.
-const running = atom({ plugin: 'shell-memo', key: 'running' } as const, [])
+const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
 // Ids of the subagents seen, so a spinner's requestId tells its loop.
-const subagents = atom({ plugin: 'shell-memo', key: 'subagents' } as const, [])
+const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
 
 // The spinner line keeps this much room for what the engine draws after the
 // memo: the icon, the ellipsis and "(7m 45s · ↓ 3.2k tokens · esc to interrupt)".
@@ -31,19 +35,6 @@ let fallback: string | undefined
 export const register: Register = (on, options) => {
   const preferred = typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku'
 
-  // A reload drops the old module mid-call, so nothing it tracked is still true.
-  on('session.start', async ($, e, next) => {
-    await update($, running, () => [])
-    return next(e)
-  })
-
-  on('agent.spawn', async ($, e, next) => {
-    const started = await next(e)
-    const agentId = started.agentId
-    if (agentId !== undefined) await rememberSubagent($, agentId)
-    return started
-  })
-
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (e.run_in_background === true) return next(e)
 
@@ -53,14 +44,14 @@ export const register: Register = (on, options) => {
 
     const known = memos.get(e.command)
     const shell: RunningShell = { id, agentId, memo: known ?? cleanDescription(e.description) }
-    await update($, running, list => [...list.filter(one => one.id !== id), shell])
+    await update($, shells, list => [...list.filter(one => one.id !== id), shell])
 
     if (known === undefined) {
       void explain($, preferred, e.command, e.description)
         .then(async memo => {
           if (memo === undefined) return
           remember(e.command, memo)
-          await update($, running, list => list.map(one => (one.id === id ? { ...one, memo } : one)))
+          await update($, shells, list => list.map(one => (one.id === id ? { ...one, memo } : one)))
         })
         .catch(() => undefined)
     }
@@ -68,21 +59,13 @@ export const register: Register = (on, options) => {
     try {
       return await next(e)
     } finally {
-      await update($, running, list => list.filter(one => one.id !== id))
+      await update($, shells, list => list.filter(one => one.id !== id))
     }
-  })
-
-  // A turn that ended runs no foreground shell any more, whatever was missed.
-  on('turn.complete', async ($, e, next) => {
-    const ended = await next(e)
-    const agentId = e.agentId ?? null
-    await update($, running, list => list.filter(one => one.agentId !== agentId))
-    return ended
   })
 
   // Beside the engine's own words: "✻ Sauteing… · 테스트 실행 중 (12s · …)".
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    const list = await read($, running)
+    const list = await read($, shells)
     const seen = await read($, subagents)
     const loop = seen.includes(e.requestId) ? e.requestId : null
     const shown = list.filter(one => one.agentId === loop && one.memo !== '').map(one => one.memo)
@@ -126,7 +109,12 @@ async function explain($: EngineInterface, preferred: string, command: string, d
 }
 
 async function rememberSubagent($: EngineInterface, agentId: string) {
-  await update($, subagents, list => (list.includes(agentId) ? list : [...list, agentId].slice(-50)))
+  await update($, subagents, list => withSubagent(list, agentId))
+}
+
+// The subagents seen, with one more: the latest 50.
+export function withSubagent(list: string[], agentId: string): string[] {
+  return list.includes(agentId) ? list : [...list, agentId].slice(-50)
 }
 
 // Claude's own one-line description, shown until the Korean memo arrives.
@@ -150,16 +138,6 @@ export function cleanMemo(text: string): string {
   return truncate(plain, 40)
 }
 
-// Hides what looks like a secret before the command leaves for the model.
-export function mask(command: string): string {
-  return command
-    .replace(/(\b[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH)[A-Za-z0-9_]*\s*=\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
-    .replace(/(--?(?:token|password|passwd|secret|api-?key|auth)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi, '$1***')
-    .replace(/(Bearer\s+)\S+/gi, '$1***')
-    .replace(/\b(?:sk|ghp|gho|ghs|github_pat|xox[abprs]|AKIA)[-_A-Za-z0-9]{8,}/g, '***')
-    .replace(/\b[A-Za-z0-9_]{32,}\b/g, '***')
-}
-
 // The memos joined beside each other, as many as the line has room for.
 export function fit(memos: readonly string[], room: number): string {
   if (room < 6 || memos.length === 0) return ''
@@ -181,38 +159,4 @@ export function fit(memos: readonly string[], room: number): string {
     return `${out} 외 ${memos.length - i}개`
   }
   return out
-}
-
-// Terminal columns: Hangul, CJK and full-width forms take two.
-export function width(text: string): number {
-  let columns = 0
-  for (const char of text) columns += isWide(char.codePointAt(0) ?? 0) ? 2 : 1
-  return columns
-}
-
-export function truncate(text: string, max: number): string {
-  if (width(text) <= max) return text
-  if (max < 2) return ''
-  let out = ''
-  let used = 0
-  for (const char of text) {
-    const w = isWide(char.codePointAt(0) ?? 0) ? 2 : 1
-    if (used + w > max - 1) break
-    out += char
-    used += w
-  }
-  return `${out}…`
-}
-
-function isWide(cp: number): boolean {
-  return (
-    (cp >= 0x1100 && cp <= 0x115f) ||
-    (cp >= 0x2e80 && cp <= 0xa4cf) ||
-    (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xfe30 && cp <= 0xfe4f) ||
-    (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
-  )
 }

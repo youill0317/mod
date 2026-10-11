@@ -1,3 +1,13 @@
+/** One foreground shell command that is running now, for the memo beside the spinner. */
+export type RunningShell = {
+  /** The tool call's id. */
+  id: string
+  /** The subagent that runs it; null for the main Claude. */
+  agentId: string | null
+  /** What is shown: Claude's own description first, then the Korean memo. */
+  memo: string
+}
+
 /** One thing that happened in the session, as the dashboard keeps it. */
 export type LogEntry = {
   id: number
@@ -87,6 +97,10 @@ declare module 'claude-code' {
       ask: string
       now: number
       pane: PaneSize | null
+      /** The memo beside the spinner: the foreground shells running now. */
+      shells: RunningShell[]
+      /** Ids of the subagents seen, so a spinner's requestId tells its loop. */
+      subagents: string[]
     }
   }
 }

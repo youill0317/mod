@@ -6,14 +6,9 @@
   },
   "plugins": [
     {
-      "name": "shell-memo",
-      "source": "./shell-memo",
-      "description": "Shows a short plain-Korean memo of the running foreground shell command beside Claude Code's working spinner."
-    },
-    {
       "name": "dashboard",
       "source": "./dashboard",
-      "description": "A pane that shows the session's work: symbol lines for what runs and waits on you, then only diagrams of the stages, progress and time, drawn to the pane's size: /dashboard."
+      "description": "Two views of the session's work: a short plain-Korean memo of the running shell command beside the working spinner, and /dashboard, a pane of what runs and waits on you with diagrams of the stages, progress and time."
     }
   ]
 }

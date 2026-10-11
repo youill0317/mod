@@ -59,7 +59,8 @@ describe('the progress dashboard', () => {
     const clock = mock.clock(on)
     const asked: string[] = []
     on('model.complete', ($, e) => {
-      asked.push(e.prompt)
+      // The memo asks a model for the shell too: only the dashboard's own asks count.
+      if (e.prompt.includes('기록 (오래된 것부터):')) asked.push(e.prompt)
       return { value: { isAnswered: true, text: '```json\n' + WRITTEN + '\n```', usage: USAGE } }
     })
     on('tool.call', { tool: 'Bash' }, () => DONE)

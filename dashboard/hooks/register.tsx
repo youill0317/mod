@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { GraphNode, LogEntry, NodeState, PaneSize, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
+import { register as memo, withSubagent } from './memo'
+import { mask, truncate, width } from './text'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -15,6 +17,9 @@ const phase = atom({ plugin: 'dashboard', key: 'phase' } as const, '')
 const ask = atom({ plugin: 'dashboard', key: 'ask' } as const, '')
 const now = atom({ plugin: 'dashboard', key: 'now' } as const, 0)
 const pane = atom({ plugin: 'dashboard', key: 'pane' } as const, null)
+// The memo's values (memo.ts), for the events hooked here for both views.
+const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
+const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
 
 // The symbols that lead the lines at the top: the work now, what waits on the person, what runs.
 const CURRENT = '●'
@@ -67,8 +72,12 @@ let seen = ''
 // Calls in flight on the main loop, to tell which one a permission dialog is for.
 const pending = new Map<string, { tool: string; key: string }>()
 
+// One mod, two views of the work: the memo beside the spinner (memo.ts), and
+// this /dashboard pane. An event both follow is hooked once, here: a mod has one
+// hook per event without a matcher, and `$` never crosses an import.
 export const register: Register = (on, options) => {
   preferred = typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku'
+  memo(on, options)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -97,6 +106,7 @@ export const register: Register = (on, options) => {
     // A reload loses the calls the old module was holding: they are no longer tracked.
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
     await update($, waiting, () => [])
+    await update($, shells, () => [])
     $.clock.every(TICK_MS, () => tick($))
     return next(e)
   })
@@ -190,7 +200,10 @@ export const register: Register = (on, options) => {
   on('agent.spawn', async ($, e, next) => {
     const started = await next(e)
     const agentId = started.agentId
-    if (agentId !== undefined && e.workflow === undefined) {
+    if (agentId === undefined) return started
+    // The memo tells a subagent's spinner by its id.
+    await update($, subagents, list => withSubagent(list, agentId))
+    if (e.workflow === undefined) {
       // A subagent's row is the role it was given.
       const role = e.description.trim() === '' ? e.subagentType : e.description.trim()
       const row: RunningItem = { id: agentId, kind: 'agent', label: role, startedAt: await $.clock.now(), background: e.background, taskId: null, last: '' }
@@ -202,6 +215,9 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const ended = await next(e)
+    // A turn that ended runs no foreground shell any more, whatever was missed.
+    const loop = e.agentId ?? null
+    await update($, shells, list => list.filter(one => one.agentId !== loop))
     if (e.agentId !== undefined) {
       const agentId = e.agentId
       const row = (await read($, running)).find(item => item.id === agentId)
@@ -896,16 +912,6 @@ export function stableKey(value: unknown): string {
   return JSON.stringify(value) ?? 'null'
 }
 
-// Hides what looks like a secret before text leaves for the model.
-export function mask(text: string): string {
-  return text
-    .replace(/(\b[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH)[A-Za-z0-9_]*\s*=\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
-    .replace(/(--?(?:token|password|passwd|secret|api-?key|auth)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi, '$1***')
-    .replace(/(Bearer\s+)\S+/gi, '$1***')
-    .replace(/\b(?:sk|ghp|gho|ghs|github_pat|xox[abprs]|AKIA)[-_A-Za-z0-9]{8,}/g, '***')
-    .replace(/\b[A-Za-z0-9_]{32,}\b/g, '***')
-}
-
 function excerpt(text: string, max: number): string {
   return truncate(text.replace(/\s+/g, ' ').trim(), max)
 }
@@ -918,40 +924,6 @@ export function ageText(ms: number): string {
   return minutes % 60 === 0 ? `${minutes / 60}시간` : `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
 }
 
-// Terminal columns: Hangul, CJK and full-width forms take two.
-export function width(text: string): number {
-  let columns = 0
-  for (const char of text) columns += isWide(char.codePointAt(0) ?? 0) ? 2 : 1
-  return columns
-}
-
-export function truncate(text: string, max: number): string {
-  if (width(text) <= max) return text
-  if (max < 2) return ''
-  let out = ''
-  let used = 0
-  for (const char of text) {
-    const w = isWide(char.codePointAt(0) ?? 0) ? 2 : 1
-    if (used + w > max - 1) break
-    out += char
-    used += w
-  }
-  return `${out}…`
-}
-
 function pad(text: string, size: number): string {
   return text + ' '.repeat(Math.max(0, size - width(text)))
-}
-
-function isWide(cp: number): boolean {
-  return (
-    (cp >= 0x1100 && cp <= 0x115f) ||
-    (cp >= 0x2e80 && cp <= 0xa4cf) ||
-    (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xfe30 && cp <= 0xfe4f) ||
-    (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
-  )
 }
