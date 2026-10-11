@@ -103,6 +103,8 @@ declare module 'claude-code' {
       shells: RunningShell[]
       /** Ids of the subagents seen, so a spinner's requestId tells its loop. */
       subagents: string[]
+      /** Whether a person is at the prompt: a `-p` run or the SDK draws no spinner, so gets no memo. */
+      interactive: boolean
     }
   }
 }

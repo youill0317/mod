@@ -41,6 +41,8 @@ describe('the memo beside the spinner', () => {
     await $.ui.render(spinner('main'))
     expect(drawn.at(-1)).toBe('… · Push kernel to Kaggle')
 
+    // The model is asked once the command has run a moment.
+    await clock.advance(1_500)
     answer()
     await clock.advance(0)
     await $.ui.render(spinner('main'))
@@ -149,6 +151,94 @@ describe('the memo beside the spinner', () => {
     await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
     await $.ui.render(spinner('main'))
     expect(drawn.at(-1)).toBe('…')
+  })
+
+  test('a command that ends before the memo is due asks no model', async ($, on) => {
+    const clock = mock.clock(on)
+    let finish: () => void = () => undefined
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (finish = () => resolve(DONE))))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: true, text: '파일 찾는 중', usage: USAGE } }
+    })
+
+    const call = $.tool.call({ tool: 'Bash', command: 'grep -rn TODO src', description: 'Find TODOs' })
+    await clock.advance(100)
+    finish()
+    await call
+    await clock.advance(5_000)
+    expect(asked).toBe(0)
+  })
+
+  test('a session with nobody at the prompt makes no memo', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: true, text: '학습 돌리는 중', usage: USAGE } }
+    })
+
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('command.register', () => ({ value: { command: 'dashboard' } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__dashboard__signal' } }))
+
+    await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+    void $.tool.call({ tool: 'Bash', command: 'python3 headless.py', description: 'Train' })
+    await clock.advance(5_000)
+    expect(asked).toBe(0)
+  })
+
+  test('a model this account cannot use gives way to the session\'s own', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('session.model', () => ({ value: 'session-model' }))
+    const models: string[] = []
+    on('model.complete', ($, e) => {
+      models.push(e.model)
+      return e.model === 'session-model'
+        ? { value: { isAnswered: true, text: '테스트 실행 중', usage: USAGE } }
+        : { value: { isAnswered: false, reason: 'api-error', status: 404, error: 'model_not_found', usage: USAGE } }
+    })
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
+    await clock.advance(1_500)
+    await clock.advance(0)
+    expect(models).toEqual(['haiku', 'session-model'])
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · 테스트 실행 중')
+  })
+
+  test('a busy model is left alone a while, not asked for every command', async ($, on) => {
+    const clock = mock.clock(on)
+    const finishers: (() => void)[] = []
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => finishers.push(() => resolve(DONE))))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: USAGE } }
+    })
+    const run = async (command: string) => {
+      const call = $.tool.call({ tool: 'Bash', command, description: 'Build' })
+      await clock.advance(1_500)
+      finishers.shift()?.()
+      await call
+    }
+
+    await run('make one')
+    expect(asked).toBe(1)
+    await run('make two')
+    await run('make three')
+    expect(asked).toBe(1)
+    await clock.advance(10_000)
+    await run('make four')
+    expect(asked).toBe(2)
   })
 })
 

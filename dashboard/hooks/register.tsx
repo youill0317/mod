@@ -3,7 +3,7 @@ import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { GraphNode, LogEntry, NodeState, PaneSize, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
 import { register as memo, withSubagent } from './memo'
-import { mask, truncate, width } from './text'
+import { backoffMs, isUnavailable, mask, truncate, width } from './text'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -20,6 +20,7 @@ const pane = atom({ plugin: 'dashboard', key: 'pane' } as const, null)
 // The memo's values (memo.ts), for the events hooked here for both views.
 const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
 const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
+const interactive = atom({ plugin: 'dashboard', key: 'interactive' } as const, true)
 
 // The symbols that lead the lines at the top: the work now, what waits on the person, what runs.
 const CURRENT = '●'
@@ -63,6 +64,9 @@ const SYSTEM = [
 // Module state: it starts over on a reload.
 let preferred = 'haiku'
 let fallback: string | undefined
+// Failed calls in a row, and until when the model is left alone after them.
+let failures = 0
+let pausedUntil = 0
 let timer: { cancel: () => void } | undefined
 let timerAt = Number.POSITIVE_INFINITY
 let busy = false
@@ -107,6 +111,7 @@ export const register: Register = (on, options) => {
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
     await update($, waiting, () => [])
     await update($, shells, () => [])
+    await update($, interactive, () => e.isInteractive)
     $.clock.every(TICK_MS, () => tick($))
     return next(e)
   })
@@ -655,11 +660,13 @@ async function withdraw($: EngineInterface, id: number) {
 }
 
 async function schedule($: EngineInterface, ms: number) {
-  const due = (await $.clock.now()) + ms
+  const at = await $.clock.now()
+  // After failed calls the model is left alone a while, whatever woke it.
+  const due = Math.max(at + ms, pausedUntil)
   if (timer !== undefined && timerAt <= due) return
   timer?.cancel()
   timerAt = due
-  timer = $.clock.after(ms, () => {
+  timer = $.clock.after(due - at, () => {
     timer = undefined
     timerAt = Number.POSITIVE_INFINITY
     return summarize($)
@@ -740,7 +747,20 @@ async function complete($: EngineInterface, prompt: string): Promise<string | un
     fallback = await $.session.model()
     answer = await asking(fallback)
   }
-  return answer.isAnswered ? answer.text : undefined
+  // A model this account cannot use answers an error rather than refusing: use the session's too.
+  if (!answer.isAnswered && answer.reason === 'api-error' && fallback === undefined && isUnavailable(answer.error, answer.status)) {
+    fallback = await $.session.model()
+    answer = await asking(fallback)
+  }
+  if (!answer.isAnswered && answer.reason === 'api-error') {
+    // Busy or failing: wait longer after each failure in a row.
+    failures += 1
+    pausedUntil = (await $.clock.now()) + backoffMs(failures)
+    return undefined
+  }
+  if (!answer.isAnswered) return undefined
+  failures = 0
+  return answer.text
 }
 
 async function startShell($: EngineInterface, id: string, input: Record<string, unknown>): Promise<number> {
