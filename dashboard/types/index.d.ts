@@ -8,18 +8,6 @@ export type RunningShell = {
   memo: string
 }
 
-/** A foreground shell of the main Claude that moved to the background while it ran. */
-export type MovedShell = {
-  /** The tool call's id. */
-  id: string
-  /** The background task's id, to end it when its notification arrives. */
-  taskId: string
-  /** The memo it had, kept above the prompt while Claude rests. */
-  memo: string
-  /** When the command started. */
-  since: number
-}
-
 /** One thing that happened in the session, as the dashboard keeps it. */
 export type LogEntry = {
   id: number
@@ -117,10 +105,6 @@ declare module 'claude-code' {
       subagents: string[]
       /** Whether a person is at the prompt: a `-p` run or the SDK draws no spinner, so gets no memo. */
       interactive: boolean
-      /** Shells moved to the background mid-run that still run: shown above the prompt while Claude rests. */
-      moved: MovedShell[]
-      /** The band's clock, so the time beside a moved shell keeps up. */
-      movedNow: number
     }
   }
 }

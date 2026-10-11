@@ -16,16 +16,6 @@ const spinner = (requestId: string) =>
     viewport: { columns: 120, rows: 40 },
   }) as const
 
-// The band above the prompt, with Claude at work or at rest.
-const band = (isWorking: boolean) =>
-  ({
-    plugin: 'dashboard',
-    component: 'AbovePrompt',
-    surface: 'terminal',
-    requestId: 'main',
-    props: { hasSurvey: false, isWorking, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
-  }) as const
-
 describe('the memo beside the spinner', () => {
   test('shows Claude\'s description, then the Korean memo, then clears', async ($, on) => {
     const clock = mock.clock(on)
@@ -250,47 +240,34 @@ describe('the memo beside the spinner', () => {
     await run('make four')
     expect(asked).toBe(2)
   })
-
-  test('a command moved to the background mid-run shows above the prompt while Claude rests', async ($, on) => {
-    const clock = mock.clock(on)
-    let moveIt: () => void = () => undefined
-    on('tool.call', { tool: 'Bash' }, () =>
-      new Promise(resolve => (moveIt = () => resolve({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg9', backgroundedByUser: true } }))),
-    )
-    on('model.complete', () => ({ value: { isAnswered: true, text: '테스트 실행 중', usage: USAGE } }))
-    on('prompt.submit', ($, e) => ({ text: e.text }))
-    on('ui.render', { component: 'AbovePrompt' }, () => ENGINE)
-
-    const call = $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
-    await clock.advance(1_500)
-    moveIt()
-    await call
-
-    // While Claude works its spinner speaks; the band stays quiet.
-    const busy = await $.ui.mount(band(true))
-    expect(await busy.find({ type: 'Text', text: /^↻ / })).toBeUndefined()
-    await busy.unmount()
-
-    await clock.advance(60_000)
-    const idle = await $.ui.mount(band(false))
-    expect(await idle.find({ type: 'Text', text: '↻ 테스트 실행 중 · 1분' })).toBeDefined()
-    await idle.unmount()
-
-    await $.prompt.submit({ text: '<task-notification><task-id>bg9</task-id></task-notification>', origin: { kind: 'task-notification' }, wait: false } as never)
-    const done = await $.ui.mount(band(false))
-    expect(await done.find({ type: 'Text', text: /^↻ / })).toBeUndefined()
-    await done.unmount()
+  test('the Bash tool asks Claude to write the memo as its description', async ($, on) => {
+    on('tool.describe', { tool: 'Bash' }, ($, e) => ({ description: e.description }))
+    const described = await $.tool.describe({ tool: 'Bash', description: 'Executes a bash command.', provider: { plugin: 'engine', tier: 'core' } } as never)
+    expect(described.description.startsWith('Executes a bash command.\n\n')).toBe(true)
+    expect(described.description).toContain("ending in '중'")
   })
 
-  test('a command that ends in the foreground leaves nothing above the prompt', async ($, on) => {
-    mock.clock(on)
-    on('tool.call', { tool: 'Bash' }, () => DONE)
-    on('ui.render', { component: 'AbovePrompt' }, () => ENGINE)
+  test('a description Claude wrote in Korean is the memo at once, and no model is asked', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: true, text: '다른 메모 중', usage: USAGE } }
+    })
 
-    await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
-    const ui = await $.ui.mount(band(false))
-    expect(await ui.find({ type: 'Text', text: /^↻ / })).toBeUndefined()
-    await ui.unmount()
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'python3 -c "import pyarrow"', description: 'Parquet 파일 구조 확인 중' })
+    await clock.advance(0)
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Parquet 파일 구조 확인 중')
+    await clock.advance(5_000)
+    expect(asked).toBe(0)
   })
 })
 
@@ -344,5 +321,7 @@ describe('helpers', () => {
     expect(cleanMemo('\n- "테스트 실행 중."\n다른 줄')).toBe('테스트 실행 중')
     expect(cleanDescription('Push kernel to Kaggle.\nmore')).toBe('Push kernel to Kaggle')
     expect(cleanDescription(undefined)).toBe('')
+    // Only the line's room cuts a memo, never its own length.
+    expect(cleanMemo('체크포인트를 Google Drive에서 받아 압축을 푸는 중')).toBe('체크포인트를 Google Drive에서 받아 압축을 푸는 중')
   })
 })
