@@ -318,6 +318,60 @@ describe('the progress dashboard', () => {
       for (const secret of ['hunter2', 'abc123xyz', 's3cr3tpw']) expect(prompt).not.toContain(secret)
     }
   })
+
+  test('a shell moved to the background keeps running there until its notification', async ($, on) => {
+    mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg7', backgroundedByUser: true } }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+
+    await $.tool.call({ tool: 'Bash', command: 'python3 train.py', description: '학습 재개' })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^↻ 학습 재개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ / })).toBeUndefined()
+    await ui.unmount()
+
+    await $.prompt.submit({ text: '<task-notification><task-id>bg7</task-id></task-notification>', origin: { kind: 'task-notification' }, wait: false } as never)
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^↻ / })).toBeUndefined()
+    await after.unmount()
+  })
+
+  test('a subagent\'s permission dialog waits as its own, not as the main shell', async ($, on) => {
+    const clock = mock.clock(on)
+    const finish: Record<string, () => void> = {}
+    on('tool.call', { tool: 'Bash' }, ($, e) => new Promise(resolve => (finish[e.tool_use_id] = () => resolve(DONE))))
+    on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+    on('classic.PermissionRequest', () => ({}))
+
+    const main = $.tool.call({ tool: 'Bash', command: 'python3 train.py', description: '학습 재개', tool_use_id: 'm1' } as never)
+    await $.agent.spawn({
+      tool_use_id: 't1',
+      prompt: '데이터셋 올리기',
+      description: '데이터셋 올리기',
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'opus',
+      background: true,
+      fork: false,
+    } as never)
+    const sub = $.tool.call({ tool: 'Bash', command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기', agentId: 'a1', tool_use_id: 's1' } as never)
+    await clock.advance(0)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기' }, agent_id: 'a1' })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^◆ Kaggle 데이터셋 만들기 · 권한 요청$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ 학습 재개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◎ 데이터셋 올리기/ })).toBeDefined()
+    await ui.unmount()
+
+    finish.s1!()
+    await sub
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
+    await after.unmount()
+    finish.m1!()
+    await main
+  })
 })
 
 describe('helpers', () => {

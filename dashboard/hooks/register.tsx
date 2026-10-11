@@ -69,8 +69,8 @@ let busy = false
 let again = false
 // The pane size the render hook last reported, so a redraw at the same size reports nothing.
 let seen = ''
-// Calls in flight on the main loop, to tell which one a permission dialog is for.
-const pending = new Map<string, { tool: string; key: string }>()
+// Calls in flight, by loop (null for the main one), to tell which one a permission dialog is for.
+const pending = new Map<string, { tool: string; key: string; agentId: string | null }>()
 
 // One mod, two views of the work: the memo beside the spinner (memo.ts), and
 // this /dashboard pane. An event both follow is hooked once, here: a mod has one
@@ -150,10 +150,16 @@ export const register: Register = (on, options) => {
       const agentId = e.agentId
       const step = stepOf(e.tool, input)
       await update($, running, list => list.map(item => (item.id === agentId ? { ...item, last: step } : item)))
-      return next(e)
+      pending.set(id, { tool: e.tool, key: stableKey(input), agentId })
+      try {
+        return await next(e)
+      } finally {
+        pending.delete(id)
+        await update($, waiting, list => list.filter(item => item.id !== id))
+      }
     }
 
-    pending.set(id, { tool: e.tool, key: stableKey(input) })
+    pending.set(id, { tool: e.tool, key: stableKey(input), agentId: null })
     try {
       if (e.tool === 'Bash') {
         const startedAt = await startShell($, id, input)
@@ -181,10 +187,11 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // The dialog asks about one of the calls in flight: it now waits on the person.
+  // The dialog asks about one of the calls in flight on its loop: it now waits on the person.
   on('classic.PermissionRequest', async ($, e, next) => {
     const key = stableKey(e.tool_input)
-    const same = [...pending.entries()].filter(([, call]) => call.tool === e.tool_name)
+    const loop = e.agent_id ?? null
+    const same = [...pending.entries()].filter(([, call]) => call.agentId === loop && call.tool === e.tool_name)
     const match = same.find(([, call]) => call.key === key) ?? (same.length === 1 ? same[0] : undefined)
     if (match !== undefined) {
       const [id] = match
@@ -750,10 +757,12 @@ async function endShell($: EngineInterface, id: string, input: Record<string, un
   const label = shellLabel(input)
   const failed = ran.deny !== undefined || ran.isError === true
   const result = (ran.result ?? {}) as { stdout?: unknown; stderr?: unknown; backgroundTaskId?: unknown }
+  const taskId = typeof result.backgroundTaskId === 'string' ? result.backgroundTaskId : null
 
-  if (input.run_in_background === true && !failed) {
-    const taskId = typeof result.backgroundTaskId === 'string' ? result.backgroundTaskId : null
-    await update($, running, list => list.map(item => (item.id === id ? { ...item, taskId } : item)))
+  // A foreground shell the person moved to the background (Ctrl+B), or one past its timeout, runs on too.
+  if ((input.run_in_background === true || taskId !== null) && !failed) {
+    await update($, running, list => list.map(item => (item.id === id ? { ...item, background: true, taskId } : item)))
+    if (input.run_in_background !== true) await record($, 'shell', `셸이 백그라운드로 넘어감: ${label}`)
     return
   }
   await update($, running, list => list.filter(item => item.id !== id))
