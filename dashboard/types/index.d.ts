@@ -27,6 +27,8 @@ export type LogEntry = {
     | 'permission'
     | 'question'
     | 'answer'
+    /** A prompt taken back with Esc before any answer: kept for its id, never shown to the model. */
+    | 'withdrawn'
   text: string
 }
 

@@ -228,6 +228,70 @@ describe('the progress dashboard', () => {
     expect(asked).toHaveLength(0)
   })
 
+  test('a prompt taken back with Esc before any answer leaves the dashboard', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.complete', () => ({ text: '' }))
+
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '코드 리뷰' })
+    await $.prompt.submit({ text: '/dataviz', origin: { kind: 'composer' }, wait: false } as never)
+    await clock.advance(2_000)
+    expect(asked.at(-1)).toContain('사용자 요청: /dataviz')
+
+    await $.turn.complete({ answer: '', durationMs: 300, isAborted: true, turnId: 't1', reason: 'aborted' } as never)
+    await clock.advance(2_000)
+    // The summary that drew it is drawn again, from a log without it.
+    expect(asked).toHaveLength(2)
+    expect(asked[1]).toContain('코드 리뷰')
+    expect(asked[1]).not.toContain('/dataviz')
+    expect(asked[1]).not.toContain('중단')
+  })
+
+  test('a summary drawn only from a prompt taken back is cleared', async ($, on) => {
+    const clock = mock.clock(on)
+    on('model.complete', () => ({ value: { isAnswered: true, text: WRITTEN, usage: USAGE } }))
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.complete', () => ({ text: '' }))
+
+    await $.prompt.submit({ text: '/dataviz', origin: { kind: 'composer' }, wait: false } as never)
+    await clock.advance(20_000)
+    const before = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await before.find({ type: 'Text', text: '● 이동' })).toBeDefined()
+    await before.unmount()
+    await $.turn.complete({ answer: '', durationMs: 300, isAborted: true, turnId: 't1', reason: 'aborted' } as never)
+    await clock.advance(2_000)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^✓ |^● / })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a turn interrupted after it did something keeps its prompt', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      if (e.prompt.includes('기록 (오래된 것부터):')) asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.complete', () => ({ text: '' }))
+    on('tool.call', { tool: 'Bash' }, () => DONE)
+
+    await $.prompt.submit({ text: '테스트 돌려줘', origin: { kind: 'composer' }, wait: false } as never)
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: '테스트 실행' })
+    await $.turn.complete({ answer: '', durationMs: 9000, isAborted: true, turnId: 't1', reason: 'aborted' } as never)
+    await clock.advance(2_000)
+    expect(asked.at(-1)).toContain('사용자 요청: 테스트 돌려줘')
+    expect(asked.at(-1)).toContain('사용자가 중단함')
+  })
+
   test('the signal never asks the person for permission', async $ => {
     const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
     expect(verdict.decision).toBe('allow')

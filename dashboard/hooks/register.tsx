@@ -57,7 +57,7 @@ const SYSTEM = [
   '- {"kind": "bars", "items": [{"label": "", "value": 숫자, "max": 숫자, "tone": "normal|good|warn|bad", "from": 기록 번호}]}  끝이 정해진 진행률이 있을 때(epoch, 처리 개수, 점수). label은 6자 이내. from은 그 값을 확인한 기록 번호.',
   '- {"kind": "time"}  단계마다 실제로 걸린 시간. 작업이 길어 어디서 시간이 갔는지 볼 만할 때.',
   '창이 좁으면 상자를 줄이고 블록을 적게, 넓으면 단계를 나눠 펼친다. 창에 넘치는 블록은 뒤에서부터 잘린다.',
-  '지난번 도식이 있으면 작업이 크게 바뀌지 않는 한 구성을 유지한다.',
+  '지난번 도식이 있으면 작업이 크게 바뀌지 않는 한 구성을 유지한다. 다만 지금 기록에 근거가 없는 단계는 뺀다.',
 ].join('\n')
 
 // Module state: it starts over on a reload.
@@ -230,6 +230,14 @@ export const register: Register = (on, options) => {
     }
     // The main turn ended: nothing of it runs in the foreground any more.
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
+    if (e.isAborted) {
+      // Esc before any answer or step takes the prompt back out of the conversation, and no
+      // event says so: a turn that ended that way takes its prompt off the dashboard too.
+      const last = (await read($, log)).at(-1)
+      if (e.answer.trim() === '' && last?.kind === 'prompt') await withdraw($, last.id)
+      else await record($, 'answer', `사용자가 중단함${e.answer.trim() === '' ? '' : `: ${excerpt(e.answer, 240)}`}`)
+      return ended
+    }
     await record($, 'answer', `Claude의 답: ${excerpt(e.answer, 240)}`)
     return ended
   })
@@ -627,6 +635,14 @@ async function record($: EngineInterface, kind: LogEntry['kind'], text: string) 
   if (await paneShown($)) await schedule($, URGENT.has(kind) ? SOON_MS : LATER_MS)
 }
 
+// A prompt taken back stays in the log as withdrawn, so no id is used twice, but the model
+// no longer reads it; a summary that already covered it is drawn again.
+async function withdraw($: EngineInterface, id: number) {
+  await update($, log, list => list.map(entry => (entry.id === id ? { ...entry, kind: 'withdrawn' as const } : entry)))
+  await update($, summary, old => (old === null || old.covers < id ? old : { ...old, covers: 0 }))
+  if (await paneShown($)) await schedule($, SOON_MS)
+}
+
 async function schedule($: EngineInterface, ms: number) {
   const due = (await $.clock.now()) + ms
   if (timer !== undefined && timerAt <= due) return
@@ -675,12 +691,17 @@ async function summarize($: EngineInterface) {
   }
   busy = true
   try {
-    const entries = await read($, log)
+    const entries = (await read($, log)).filter(entry => entry.kind !== 'withdrawn')
     const previous = await read($, summary)
     const newest = entries[entries.length - 1]?.id ?? 0
     const size = await read($, pane)
     const fit = fitOf(size)
-    if (newest === 0 || (previous !== null && previous.covers >= newest && previous.fit === fit)) return
+    // Nothing left to draw from (the only prompt was taken back): nothing is drawn.
+    if (newest === 0) {
+      if (previous !== null) await update($, summary, () => null)
+      return
+    }
+    if (previous !== null && previous.covers >= newest && previous.fit === fit) return
 
     const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), await $.clock.now(), size)
     const text = await complete($, prompt)
