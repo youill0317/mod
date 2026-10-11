@@ -9,6 +9,8 @@ const PANE = {
   props: { title: '작업 현황', isFocused: false, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
 } as const
 
+// The dashboard pane as the surface lists it while it shows.
+const SHOWN = { id: 'dashboard', title: '작업 현황', isShown: true, isFocused: false, isPlaced: true }
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const DONE = { result: { stdout: 'epoch 3/10 loss=0.51', stderr: '', interrupted: false } }
 
@@ -61,6 +63,7 @@ describe('the progress dashboard', () => {
       return { value: { isAnswered: true, text: '```json\n' + WRITTEN + '\n```', usage: USAGE } }
     })
     on('tool.call', { tool: 'Bash' }, () => DONE)
+    on('ui.panes', () => ({ value: [SHOWN] }))
 
     await $.tool.call({ tool: 'Bash', command: 'rclone ls gdrive:ckpt', description: '체크포인트 확인' })
     await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
@@ -179,6 +182,7 @@ describe('the progress dashboard', () => {
       asked.push(e.prompt)
       return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
     })
+    on('ui.panes', () => ({ value: [SHOWN] }))
 
     const wide = await $.ui.mount({ ...PANE, surface: 'terminal' })
     await clock.advance(0)
@@ -208,6 +212,21 @@ describe('the progress dashboard', () => {
     await narrow.unmount()
   })
 
+  test('a closed dashboard wakes no model', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('turn.complete', () => ({ text: '' }))
+
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
+    await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'x', reason: 'answer' } as never)
+    await clock.advance(30_000)
+    expect(asked).toHaveLength(0)
+  })
+
   test('the signal never asks the person for permission', async $ => {
     const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
     expect(verdict.decision).toBe('allow')
@@ -221,7 +240,7 @@ describe('helpers', () => {
         { id: 1, at: 0, kind: 'shell-done', text: '셸 끝남: 체크포인트 확인' },
         { id: 2, at: 60_000, kind: 'signal', text: '학습 재개' },
       ],
-      { now: 'n', blocks: [{ kind: 'graph', nodes: [{ label: '확인', state: 'done', note: '', branches: [], from: 1 }] }], covers: 1, at: 0, fit: '4/2' },
+      { now: 'n', blocks: [{ kind: 'graph', nodes: [{ label: '확인', state: 'done', note: '', branches: [], from: 1 }] }], covers: 1, fit: '4/2' },
       [{ id: 'x', kind: 'shell', label: '학습', startedAt: 0, background: true, taskId: null, last: '' }],
       [],
       '학습 재개',

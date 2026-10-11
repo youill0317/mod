@@ -68,7 +68,6 @@ export type Summary = {
   blocks: SummaryBlock[]
   /** The last log id this summary covers. */
   covers: number
-  at: number
   /** The pane size class it was laid out for (fitOf); another one lays it out again. */
   fit: string
 }

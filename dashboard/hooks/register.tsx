@@ -279,9 +279,7 @@ export const register: Register = (on, options) => {
     // Below it, only diagrams: as many as the pane holds, the model's most important first.
     const room = rows - topRows - (topRows > 0 ? 1 : 0)
     const blocks = fitBlocks(
-      // A summary an older version of the mod wrote may hold kinds it no longer draws.
       (written?.blocks ?? [])
-        .filter(block => KINDS.has(block.kind))
         .map(block => (block.kind === 'graph' ? { ...block, nodes: fitGraph(clipNodes(block.nodes, columns), columns, room) } : block))
         .map(block => ({ block, rows: blockRows(block, columns, byId, at) })),
       room + (topRows > 0 ? 1 : 0),
@@ -314,7 +312,6 @@ export const register: Register = (on, options) => {
 type Draw = Parameters<typeof h>[0]
 type Node = ReturnType<typeof h>
 
-const KINDS: ReadonlySet<string> = new Set(['graph', 'bars', 'time'])
 const TONE_COLOR: Record<Tone, string> = { normal: 'suggestion', good: 'success', warn: 'warning', bad: 'error' }
 
 function drawBlock(BoxEl: unknown, TextEl: unknown, block: SummaryBlock, columns: number, byId: Map<number, LogEntry>, at: number): Node {
@@ -610,8 +607,8 @@ function trimNumber(value: number): string {
 async function record($: EngineInterface, kind: LogEntry['kind'], text: string) {
   const at = await $.clock.now()
   await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(text, 300) }].slice(-MAX_LOG))
-  if (URGENT.has(kind)) await schedule($, SOON_MS)
-  else if (await paneShown($)) await schedule($, LATER_MS)
+  // A pane nobody sees costs no model call: opening it draws from the whole log.
+  if (await paneShown($)) await schedule($, URGENT.has(kind) ? SOON_MS : LATER_MS)
 }
 
 async function schedule($: EngineInterface, ms: number) {
@@ -674,8 +671,7 @@ async function summarize($: EngineInterface) {
     if (text === undefined) return
     const written = parseSummary(text, new Set(entries.map(entry => entry.id)))
     if (written === undefined) return
-    const at = await $.clock.now()
-    await update($, summary, () => ({ ...written, covers: newest, at, fit }))
+    await update($, summary, () => ({ ...written, covers: newest, fit }))
   } finally {
     busy = false
     if (again) {
@@ -772,7 +768,7 @@ export function fitOf(size: PaneSize | null): string {
 }
 
 /** The model's JSON as a summary, or undefined when it is not one. Counts and lengths are held here. */
-export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summary, 'covers' | 'at' | 'fit'> | undefined {
+export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summary, 'covers' | 'fit'> | undefined {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start === -1 || end <= start) return undefined
@@ -784,13 +780,12 @@ export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summa
   }
   const from = (value: unknown) => (typeof value === 'number' && ids.has(value) ? value : 0)
   const blocks = list(raw.blocks).map(obj)
-  const graph = blocks.find(block => block.kind === 'graph' || block.kind === 'flow')
+  const graph = blocks.find(block => block.kind === 'graph')
   const nodes = graph === undefined ? [] : nodesOf(graph, from)
   const parsed = blocks
     .map((block): SummaryBlock | undefined => {
       switch (block.kind) {
         case 'graph':
-        case 'flow':
           return block === graph && nodes.length > 0 ? { kind: 'graph', nodes } : undefined
         case 'bars': {
           const items = list(block.items)
@@ -815,7 +810,7 @@ export function parseSummary(text: string, ids: ReadonlySet<number>): Omit<Summa
 }
 
 function nodesOf(graph: Record<string, unknown>, from: (value: unknown) => number): GraphNode[] {
-  const nodes = list(graph.kind === 'flow' ? graph.steps : graph.nodes)
+  const nodes = list(graph.nodes)
     .map(obj)
     .map(node => ({
       label: str(node.label, 24),

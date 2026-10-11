@@ -17,6 +17,7 @@ test('a real Haiku answer to a blog deploy draws the top lines, then only diagra
       ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } }
       : new Promise(resolve => (finish = () => resolve({ result: { stdout: '', stderr: '', interrupted: false } }))),
   )
+  on('ui.panes', () => ({ value: [{ id: 'dashboard', title: '작업 과정', isShown: true, isFocused: false, isPlaced: true }] }))
   await $.tool.call({ tool: 'mcp__dashboard__signal', phase: "사용자 요청: 내 연구 블로그를 Astro로 만들고 Vercel에 배포해줘. 글 12개는 notes 폴더에 있어" })
   await clock.advance(120000)
   await $.tool.call({ tool: 'mcp__dashboard__signal', phase: "프로젝트 준비" })
