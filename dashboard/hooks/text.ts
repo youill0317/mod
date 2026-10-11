@@ -10,6 +10,18 @@ export function mask(text: string): string {
     .replace(/\b[A-Za-z0-9_]{32,}\b/g, '***')
 }
 
+// Whether a model call's API error means this account cannot use that model
+// (not offered on its provider, not allowed for its organization): the
+// session's own model is asked instead. Other errors may clear on their own.
+export function isUnavailable(error: string, status: number | null): boolean {
+  return error === 'model_not_found' || error === 'invalid_request' || error === 'oauth_org_not_allowed' || status === 403 || status === 404
+}
+
+// How long to leave the model alone after this many failed calls in a row.
+export function backoffMs(failures: number): number {
+  return Math.min(10_000 * 2 ** Math.max(0, failures - 1), 600_000)
+}
+
 // Terminal columns: Hangul, CJK and full-width forms take two.
 export function width(text: string): number {
   let columns = 0

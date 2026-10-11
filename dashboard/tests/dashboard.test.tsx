@@ -232,6 +232,27 @@ describe('the progress dashboard', () => {
     const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
     expect(verdict.decision).toBe('allow')
   })
+
+  test('a rate-limited model is left alone a while before it is woken again', async ($, on) => {
+    const clock = mock.clock(on)
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
+    await clock.advance(2_000)
+    expect(asked).toBe(1)
+
+    // Another urgent change would wake it in 2 seconds; after the failure it waits longer.
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '평가' })
+    await clock.advance(2_000)
+    expect(asked).toBe(1)
+    await clock.advance(8_000)
+    expect(asked).toBe(2)
+  })
 })
 
 describe('helpers', () => {
