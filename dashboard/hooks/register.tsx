@@ -3,7 +3,7 @@ import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { GraphNode, LogEntry, NodeState, PaneSize, RunningItem, Summary, SummaryBlock, Tone, WaitingItem } from '../types'
 import { register as memo, withSubagent } from './memo'
-import { mask, truncate, width } from './text'
+import { backoffMs, isUnavailable, mask, truncate, width } from './text'
 
 const PANE = 'dashboard'
 const SIGNAL = 'signal'
@@ -20,6 +20,7 @@ const pane = atom({ plugin: 'dashboard', key: 'pane' } as const, null)
 // The memo's values (memo.ts), for the events hooked here for both views.
 const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
 const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
+const interactive = atom({ plugin: 'dashboard', key: 'interactive' } as const, true)
 
 // The symbols that lead the lines at the top: the work now, what waits on the person, what runs.
 const CURRENT = '●'
@@ -57,20 +58,23 @@ const SYSTEM = [
   '- {"kind": "bars", "items": [{"label": "", "value": 숫자, "max": 숫자, "tone": "normal|good|warn|bad", "from": 기록 번호}]}  끝이 정해진 진행률이 있을 때(epoch, 처리 개수, 점수). label은 6자 이내. from은 그 값을 확인한 기록 번호.',
   '- {"kind": "time"}  단계마다 실제로 걸린 시간. 작업이 길어 어디서 시간이 갔는지 볼 만할 때.',
   '창이 좁으면 상자를 줄이고 블록을 적게, 넓으면 단계를 나눠 펼친다. 창에 넘치는 블록은 뒤에서부터 잘린다.',
-  '지난번 도식이 있으면 작업이 크게 바뀌지 않는 한 구성을 유지한다.',
+  '지난번 도식이 있으면 작업이 크게 바뀌지 않는 한 구성을 유지한다. 다만 지금 기록에 근거가 없는 단계는 뺀다.',
 ].join('\n')
 
 // Module state: it starts over on a reload.
 let preferred = 'haiku'
 let fallback: string | undefined
+// Failed calls in a row, and until when the model is left alone after them.
+let failures = 0
+let pausedUntil = 0
 let timer: { cancel: () => void } | undefined
 let timerAt = Number.POSITIVE_INFINITY
 let busy = false
 let again = false
 // The pane size the render hook last reported, so a redraw at the same size reports nothing.
 let seen = ''
-// Calls in flight on the main loop, to tell which one a permission dialog is for.
-const pending = new Map<string, { tool: string; key: string }>()
+// Calls in flight, by loop (null for the main one), to tell which one a permission dialog is for.
+const pending = new Map<string, { tool: string; key: string; agentId: string | null }>()
 
 // One mod, two views of the work: the memo beside the spinner (memo.ts), and
 // this /dashboard pane. An event both follow is hooked once, here: a mod has one
@@ -107,6 +111,7 @@ export const register: Register = (on, options) => {
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
     await update($, waiting, () => [])
     await update($, shells, () => [])
+    await update($, interactive, () => e.isInteractive)
     $.clock.every(TICK_MS, () => tick($))
     return next(e)
   })
@@ -130,11 +135,11 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: SIGNAL_ID }, async ($, e) => {
     const input = e as unknown as { phase?: unknown; note?: unknown }
-    const said = typeof input.phase === 'string' ? input.phase.trim() : ''
-    const note = typeof input.note === 'string' ? input.note.trim() : ''
+    const said = typeof input.phase === 'string' ? excerpt(input.phase, 60) : ''
+    const note = typeof input.note === 'string' ? excerpt(input.note, 80) : ''
     if (said !== '') await update($, phase, () => said)
     // What Claude says is blocked or the person must decide waits on them until they answer.
-    if (note !== '') await update($, ask, () => excerpt(note, 80))
+    if (note !== '') await update($, ask, () => note)
     await record($, 'signal', note === '' ? said : `${said} (${note})`)
     return { result: '대시보드에 기록했습니다.' }
   })
@@ -150,10 +155,16 @@ export const register: Register = (on, options) => {
       const agentId = e.agentId
       const step = stepOf(e.tool, input)
       await update($, running, list => list.map(item => (item.id === agentId ? { ...item, last: step } : item)))
-      return next(e)
+      pending.set(id, { tool: e.tool, key: stableKey(input), agentId })
+      try {
+        return await next(e)
+      } finally {
+        pending.delete(id)
+        await update($, waiting, list => list.filter(item => item.id !== id))
+      }
     }
 
-    pending.set(id, { tool: e.tool, key: stableKey(input) })
+    pending.set(id, { tool: e.tool, key: stableKey(input), agentId: null })
     try {
       if (e.tool === 'Bash') {
         const startedAt = await startShell($, id, input)
@@ -181,10 +192,11 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // The dialog asks about one of the calls in flight: it now waits on the person.
+  // The dialog asks about one of the calls in flight on its loop: it now waits on the person.
   on('classic.PermissionRequest', async ($, e, next) => {
     const key = stableKey(e.tool_input)
-    const same = [...pending.entries()].filter(([, call]) => call.tool === e.tool_name)
+    const loop = e.agent_id ?? null
+    const same = [...pending.entries()].filter(([, call]) => call.agentId === loop && call.tool === e.tool_name)
     const match = same.find(([, call]) => call.key === key) ?? (same.length === 1 ? same[0] : undefined)
     if (match !== undefined) {
       const [id] = match
@@ -230,6 +242,14 @@ export const register: Register = (on, options) => {
     }
     // The main turn ended: nothing of it runs in the foreground any more.
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
+    if (e.isAborted) {
+      // Esc before any answer or step takes the prompt back out of the conversation, and no
+      // event says so: a turn that ended that way takes its prompt off the dashboard too.
+      const last = (await read($, log)).at(-1)
+      if (e.answer.trim() === '' && last?.kind === 'prompt') await withdraw($, last.id)
+      else await record($, 'answer', `사용자가 중단함${e.answer.trim() === '' ? '' : `: ${excerpt(e.answer, 240)}`}`)
+      return ended
+    }
     await record($, 'answer', `Claude의 답: ${excerpt(e.answer, 240)}`)
     return ended
   })
@@ -298,7 +318,8 @@ export const register: Register = (on, options) => {
       (written?.blocks ?? [])
         .map(block => (block.kind === 'graph' ? { ...block, nodes: fitGraph(clipNodes(block.nodes, columns), columns, room) } : block))
         .map(block => ({ block, rows: blockRows(block, columns, byId, at) })),
-      room + (topRows > 0 ? 1 : 0),
+      // Each block counts the row above it; with nothing above the first, that row is free.
+      room + 1,
     )
 
     return (
@@ -391,7 +412,8 @@ export function fitGraph(nodes: readonly GraphNode[], columns: number, room: num
   const foldable = settled === -1 ? bare.length - 1 : settled
   let fitted = bare
   for (let folded = 2; folded <= foldable && graphHeight(fitted, columns) > room; folded++) {
-    const fold: GraphNode = { label: '…', state: 'done', note: `${folded}단계`, branches: [], from: bare[0]!.from }
+    const failed = bare.slice(0, folded).filter(node => node.state === 'failed').length
+    const fold: GraphNode = { label: '…', state: failed > 0 ? 'failed' : 'done', note: failed > 0 ? `${folded}단계, 실패 ${failed}` : `${folded}단계`, branches: [], from: bare[0]!.from }
     fitted = [fold, ...bare.slice(folded)]
   }
   return fitted
@@ -534,7 +556,7 @@ export function graphRows(widths: readonly number[], room: number): number[][] {
 
 /**
  * Each stage's start and length from the log entries the stages began at: a
- * stage lasts until the next one begins, the last until now. A start the model
+ * stage lasts until the next one begins, the last until now (or, when it is no longer current, until the latest log entry). A start the model
  * cited out of order is held at the one before, and a stage whose entry is
  * gone from the log is left out.
  */
@@ -545,7 +567,9 @@ export function spans(items: readonly { label: string; state: NodeState; from: n
     if (entry === undefined) continue
     started.push({ label: item.label, state: item.state, start: Math.max(entry.at, started[started.length - 1]?.start ?? entry.at) })
   }
-  return started.map((item, i) => ({ ...item, end: Math.max(item.start, started[i + 1]?.start ?? at) }))
+  // A last stage that is not current ended with the latest thing logged, not now.
+  const logged = Math.max(0, ...[...byId.values()].map(entry => entry.at))
+  return started.map((item, i) => ({ ...item, end: Math.max(item.start, started[i + 1]?.start ?? (item.state === 'now' ? at : Math.min(at, logged))) }))
 }
 
 /**
@@ -622,17 +646,27 @@ function trimNumber(value: number): string {
 
 async function record($: EngineInterface, kind: LogEntry['kind'], text: string) {
   const at = await $.clock.now()
-  await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(text, 300) }].slice(-MAX_LOG))
+  await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(mask(text), 300) }].slice(-MAX_LOG))
   // A pane nobody sees costs no model call: opening it draws from the whole log.
   if (await paneShown($)) await schedule($, URGENT.has(kind) ? SOON_MS : LATER_MS)
 }
 
+// A prompt taken back stays in the log as withdrawn, so no id is used twice, but the model
+// no longer reads it; a summary that already covered it is drawn again.
+async function withdraw($: EngineInterface, id: number) {
+  await update($, log, list => list.map(entry => (entry.id === id ? { ...entry, kind: 'withdrawn' as const } : entry)))
+  await update($, summary, old => (old === null || old.covers < id ? old : { ...old, covers: 0 }))
+  if (await paneShown($)) await schedule($, SOON_MS)
+}
+
 async function schedule($: EngineInterface, ms: number) {
-  const due = (await $.clock.now()) + ms
+  const at = await $.clock.now()
+  // After failed calls the model is left alone a while, whatever woke it.
+  const due = Math.max(at + ms, pausedUntil)
   if (timer !== undefined && timerAt <= due) return
   timer?.cancel()
   timerAt = due
-  timer = $.clock.after(ms, () => {
+  timer = $.clock.after(due - at, () => {
     timer = undefined
     timerAt = Number.POSITIVE_INFINITY
     return summarize($)
@@ -675,12 +709,17 @@ async function summarize($: EngineInterface) {
   }
   busy = true
   try {
-    const entries = await read($, log)
+    const entries = (await read($, log)).filter(entry => entry.kind !== 'withdrawn')
     const previous = await read($, summary)
     const newest = entries[entries.length - 1]?.id ?? 0
     const size = await read($, pane)
     const fit = fitOf(size)
-    if (newest === 0 || (previous !== null && previous.covers >= newest && previous.fit === fit)) return
+    // Nothing left to draw from (the only prompt was taken back): nothing is drawn.
+    if (newest === 0) {
+      if (previous !== null) await update($, summary, () => null)
+      return
+    }
+    if (previous !== null && previous.covers >= newest && previous.fit === fit) return
 
     const prompt = promptFor(entries.slice(-LOG_FOR_MODEL), previous, await read($, running), await read($, waiting), await read($, phase), await $.clock.now(), size)
     const text = await complete($, prompt)
@@ -708,7 +747,20 @@ async function complete($: EngineInterface, prompt: string): Promise<string | un
     fallback = await $.session.model()
     answer = await asking(fallback)
   }
-  return answer.isAnswered ? answer.text : undefined
+  // A model this account cannot use answers an error rather than refusing: use the session's too.
+  if (!answer.isAnswered && answer.reason === 'api-error' && fallback === undefined && isUnavailable(answer.error, answer.status)) {
+    fallback = await $.session.model()
+    answer = await asking(fallback)
+  }
+  if (!answer.isAnswered && answer.reason === 'api-error') {
+    // Busy or failing: wait longer after each failure in a row.
+    failures += 1
+    pausedUntil = (await $.clock.now()) + backoffMs(failures)
+    return undefined
+  }
+  if (!answer.isAnswered) return undefined
+  failures = 0
+  return answer.text
 }
 
 async function startShell($: EngineInterface, id: string, input: Record<string, unknown>): Promise<number> {
@@ -725,10 +777,12 @@ async function endShell($: EngineInterface, id: string, input: Record<string, un
   const label = shellLabel(input)
   const failed = ran.deny !== undefined || ran.isError === true
   const result = (ran.result ?? {}) as { stdout?: unknown; stderr?: unknown; backgroundTaskId?: unknown }
+  const taskId = typeof result.backgroundTaskId === 'string' ? result.backgroundTaskId : null
 
-  if (input.run_in_background === true && !failed) {
-    const taskId = typeof result.backgroundTaskId === 'string' ? result.backgroundTaskId : null
-    await update($, running, list => list.map(item => (item.id === id ? { ...item, taskId } : item)))
+  // A foreground shell the person moved to the background (Ctrl+B), or one past its timeout, runs on too.
+  if ((input.run_in_background === true || taskId !== null) && !failed) {
+    await update($, running, list => list.map(item => (item.id === id ? { ...item, background: true, taskId } : item)))
+    if (input.run_in_background !== true) await record($, 'shell', `셸이 백그라운드로 넘어감: ${label}`)
     return
   }
   await update($, running, list => list.filter(item => item.id !== id))
@@ -754,9 +808,9 @@ export function promptFor(
   return [
     size === null ? '' : `창: 가로 ${size.columns}칸, 세로 ${size.rows}줄. 단계 상자는 한 줄에 ${nodesAcross(size.columns)}개쯤 들어간다.`,
     size !== null && previous !== null && previous.fit !== fitOf(size) ? '창 크기가 지난번과 다르다: 새 크기에 맞게 다시 짠다.' : '',
-    said === '' ? '' : `Claude가 알린 지금 단계: ${said}`,
-    `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${item.label} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
-    `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => item.label).join('; ')}`,
+    said === '' ? '' : `Claude가 알린 지금 단계: ${mask(said)}`,
+    `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${mask(item.label)} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
+    `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => mask(item.label)).join('; ')}`,
     previous === null ? '' : `지난번 도식: ${JSON.stringify({ now: previous.now, blocks: previous.blocks })}`,
     '기록 (오래된 것부터):',
     ...lines,
@@ -858,7 +912,7 @@ const TONES = ['normal', 'good', 'warn', 'bad'] as const
 const STATES = ['done', 'now', 'todo', 'failed', 'wait'] as const
 const stateOf = (value: unknown): NodeState => STATES.find(state => state === value) ?? 'todo'
 const toneOf = (value: unknown): Tone => TONES.find(tone => tone === value) ?? 'normal'
-const str = (value: unknown, max: number) => (typeof value === 'string' ? truncate(value.trim(), max) : '')
+const str = (value: unknown, max: number) => (typeof value === 'string' ? excerpt(value, max) : '')
 const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : Number(value) || 0)
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
 const obj = (value: unknown) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {})
@@ -896,7 +950,7 @@ function baseName(path: unknown): string {
 function outputOf(stdout: unknown, stderr: unknown): string {
   const text = [stdout, stderr].filter((part): part is string => typeof part === 'string' && part.trim() !== '').join('\n')
   if (text === '') return ''
-  return mask(text.trim().slice(-240)).replace(/\s+/g, ' ').trim()
+  return mask(text.trim()).slice(-240).replace(/\s+/g, ' ').trim()
 }
 
 /** JSON with sorted keys, so two spellings of one input compare equal. */

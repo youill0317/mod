@@ -27,6 +27,8 @@ export type LogEntry = {
     | 'permission'
     | 'question'
     | 'answer'
+    /** A prompt taken back with Esc before any answer: kept for its id, never shown to the model. */
+    | 'withdrawn'
   text: string
 }
 
@@ -101,6 +103,8 @@ declare module 'claude-code' {
       shells: RunningShell[]
       /** Ids of the subagents seen, so a spinner's requestId tells its loop. */
       subagents: string[]
+      /** Whether a person is at the prompt: a `-p` run or the SDK draws no spinner, so gets no memo. */
+      interactive: boolean
     }
   }
 }

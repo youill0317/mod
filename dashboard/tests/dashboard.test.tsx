@@ -152,7 +152,7 @@ describe('the progress dashboard', () => {
     mock.clock(on)
     on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
     on('turn.complete', () => ({ text: '' }))
-    on('tool.call', { tool: 'Grep' }, () => ({ result: '' }))
+    on('tool.call', { tool: 'Grep' as never }, () => ({ result: '' }))
 
     await $.agent.spawn({
       tool_use_id: 't1',
@@ -228,9 +228,170 @@ describe('the progress dashboard', () => {
     expect(asked).toHaveLength(0)
   })
 
+  test('a prompt taken back with Esc before any answer leaves the dashboard', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.complete', () => ({ text: '' }))
+
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '코드 리뷰' })
+    await $.prompt.submit({ text: '/dataviz', origin: { kind: 'composer' }, wait: false } as never)
+    await clock.advance(2_000)
+    expect(asked.at(-1)).toContain('사용자 요청: /dataviz')
+
+    await $.turn.complete({ answer: '', durationMs: 300, isAborted: true, turnId: 't1', reason: 'aborted' } as never)
+    await clock.advance(2_000)
+    // The summary that drew it is drawn again, from a log without it.
+    expect(asked).toHaveLength(2)
+    expect(asked[1]).toContain('코드 리뷰')
+    expect(asked[1]).not.toContain('/dataviz')
+    expect(asked[1]).not.toContain('중단')
+  })
+
+  test('a summary drawn only from a prompt taken back is cleared', async ($, on) => {
+    const clock = mock.clock(on)
+    on('model.complete', () => ({ value: { isAnswered: true, text: WRITTEN, usage: USAGE } }))
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.complete', () => ({ text: '' }))
+
+    await $.prompt.submit({ text: '/dataviz', origin: { kind: 'composer' }, wait: false } as never)
+    await clock.advance(20_000)
+    const before = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await before.find({ type: 'Text', text: '● 이동' })).toBeDefined()
+    await before.unmount()
+    await $.turn.complete({ answer: '', durationMs: 300, isAborted: true, turnId: 't1', reason: 'aborted' } as never)
+    await clock.advance(2_000)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^✓ |^● / })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a turn interrupted after it did something keeps its prompt', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      if (e.prompt.includes('기록 (오래된 것부터):')) asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('turn.complete', () => ({ text: '' }))
+    on('tool.call', { tool: 'Bash' }, () => DONE)
+
+    await $.prompt.submit({ text: '테스트 돌려줘', origin: { kind: 'composer' }, wait: false } as never)
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: '테스트 실행' })
+    await $.turn.complete({ answer: '', durationMs: 9000, isAborted: true, turnId: 't1', reason: 'aborted' } as never)
+    await clock.advance(2_000)
+    expect(asked.at(-1)).toContain('사용자 요청: 테스트 돌려줘')
+    expect(asked.at(-1)).toContain('사용자가 중단함')
+  })
+
   test('the signal never asks the person for permission', async $ => {
     const verdict = await $.tool.check({ tool: 'mcp__dashboard__signal', input: { phase: '학습 재개' } })
     expect(verdict.decision).toBe('allow')
+  })
+
+  test('secrets in a prompt, a note or a step label never reach the model', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      if (e.prompt.includes('기록 (오래된 것부터):')) asked.push(e.prompt)
+      return { value: { isAnswered: true, text: WRITTEN, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+
+    await $.prompt.submit({ text: 'DB_PASS=hunter2 로 접속해줘', origin: { kind: 'composer' } } as never)
+    void $.tool.call({ tool: 'Bash', command: 'true', description: 'deploy with API_TOKEN=abc123xyz' })
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '배포', note: 'postgres://admin:s3cr3tpw@db 확인' })
+    await clock.advance(2_000)
+
+    expect(asked.length).toBeGreaterThan(0)
+    for (const prompt of asked) {
+      for (const secret of ['hunter2', 'abc123xyz', 's3cr3tpw']) expect(prompt).not.toContain(secret)
+    }
+  })
+
+  test('a shell moved to the background keeps running there until its notification', async ($, on) => {
+    mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg7', backgroundedByUser: true } }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+
+    await $.tool.call({ tool: 'Bash', command: 'python3 train.py', description: '학습 재개' })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^↻ 학습 재개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ / })).toBeUndefined()
+    await ui.unmount()
+
+    await $.prompt.submit({ text: '<task-notification><task-id>bg7</task-id></task-notification>', origin: { kind: 'task-notification' }, wait: false } as never)
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^↻ / })).toBeUndefined()
+    await after.unmount()
+  })
+
+  test('a subagent\'s permission dialog waits as its own, not as the main shell', async ($, on) => {
+    const clock = mock.clock(on)
+    const finish: Record<string, () => void> = {}
+    on('tool.call', { tool: 'Bash' }, ($, e) => new Promise(resolve => (finish[e.tool_use_id] = () => resolve(DONE))))
+    on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+    on('classic.PermissionRequest', () => ({}))
+
+    const main = $.tool.call({ tool: 'Bash', command: 'python3 train.py', description: '학습 재개', tool_use_id: 'm1' } as never)
+    await $.agent.spawn({
+      tool_use_id: 't1',
+      prompt: '데이터셋 올리기',
+      description: '데이터셋 올리기',
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'opus',
+      background: true,
+      fork: false,
+    } as never)
+    const sub = $.tool.call({ tool: 'Bash', command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기', agentId: 'a1', tool_use_id: 's1' } as never)
+    await clock.advance(0)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'kaggle datasets create -p .', description: 'Kaggle 데이터셋 만들기' }, agent_id: 'a1' })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^◆ Kaggle 데이터셋 만들기 · 권한 요청$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ 학습 재개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◎ 데이터셋 올리기/ })).toBeDefined()
+    await ui.unmount()
+
+    finish.s1!()
+    await sub
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
+    await after.unmount()
+    finish.m1!()
+    await main
+  })
+
+  test('a rate-limited model is left alone a while before it is woken again', async ($, on) => {
+    const clock = mock.clock(on)
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '학습 재개' })
+    await clock.advance(2_000)
+    expect(asked).toBe(1)
+
+    // Another urgent change would wake it in 2 seconds; after the failure it waits longer.
+    await $.tool.call({ tool: 'mcp__dashboard__signal', phase: '평가' })
+    await clock.advance(2_000)
+    expect(asked).toBe(1)
+    await clock.advance(8_000)
+    expect(asked).toBe(2)
   })
 })
 
@@ -342,6 +503,31 @@ describe('helpers', () => {
       { label: '배포', state: 'todo' },
     ] as const)
     expect(steps.map(step => step.label)).toEqual(['빌드', '측정', '이미지', '배포'])
+  })
+
+  test('line breaks from the model never reach a label or a note', () => {
+    const written = parseSummary('{"now":"a\\nb","blocks":[{"kind":"graph","nodes":[{"label":"빌드\\n단계","state":"now","note":"1\\n\\n2","from":1}]}]}', new Set([1]))
+    expect(written?.now).toBe('a b')
+    const node = (written?.blocks[0] as { nodes: { label: string; note: string }[] }).nodes[0]!
+    expect([node.label, node.note]).toEqual(['빌드 단계', '1 2'])
+  })
+
+  test('a finished last stage ends at the latest log entry, not now', () => {
+    const byId = new Map([[1, { at: 0 }], [2, { at: 60_000 }]])
+    const items = [{ label: '빌드', state: 'done' as const, from: 1 }, { label: '배포', state: 'done' as const, from: 2 }]
+    expect(spans(items, byId, 3 * 3600_000).map(row => row.end)).toEqual([60_000, 60_000])
+  })
+
+  test('a fold that covers a failed stage shows it', () => {
+    const node = (label: string, state: 'done' | 'failed' | 'now') => ({ label, state, note: '12쪽', branches: [], from: 0 })
+    const nodes = [node('준비', 'done'), node('빌드', 'failed'), node('검사', 'done'), node('최적화', 'now')]
+    const fold = fitGraph(nodes, 34, 6)[0]!
+    expect([fold.state, fold.note]).toEqual(['failed', '3단계, 실패 1'])
+  })
+
+  test('the first diagram under no top lines uses the row it does not draw', () => {
+    // Nine and two rows with nothing above: only the second's margin is drawn, so 9 + 1 + 2 = 12 fit.
+    expect(fitBlocks([{ block: 'graph', rows: 9 }, { block: 'bars', rows: 2 }], 12 + 1)).toEqual(['graph', 'bars'])
   })
 
   test('two spellings of one input compare equal', () => {

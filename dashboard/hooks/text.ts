@@ -8,6 +8,25 @@ export function mask(text: string): string {
     .replace(/(Bearer\s+)\S+/gi, '$1***')
     .replace(/\b(?:sk|ghp|gho|ghs|github_pat|xox[abprs]|AKIA)[-_A-Za-z0-9]{8,}/g, '***')
     .replace(/\b[A-Za-z0-9_]{32,}\b/g, '***')
+    .replace(/(\b[A-Za-z0-9_]*_(?:KEY|PASS)\s*=\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:\/@]*:)[^\s@\/]+@/gi, '$1***@')
+    .replace(/(\s(?:-u|--user)(?:=|\s+))("[^"]*:[^"]*"|'[^']*:[^']*'|[^\s:]*:\S+)/g, '$1***')
+    .replace(/(\bmysql\w*\b[^|;&\n]*?\s-p)\S+/g, '$1***')
+    .replace(/(\bsshpass\b[^|;&\n]*?\s-p\s*)("[^"]*"|'[^']*'|\S+)/g, '$1***')
+    .replace(/(\b(?:X-[A-Za-z-]*(?:Key|Token|Secret|Auth)[A-Za-z-]*|Api-?Key|(?:Proxy-)?Authorization|Cookie)\s*:\s*)[^"'\n]+/gi, '$1***')
+    .replace(/[A-Za-z0-9+\/=]{32,}/g, found => (/^[/.]/.test(found) || !/[A-Z]/.test(found) || !/[a-z]/.test(found) || !/\d/.test(found) || !/[+\/=]/.test(found) ? found : '***'))
+}
+
+// Whether a model call's API error means this account cannot use that model
+// (not offered on its provider, not allowed for its organization): the
+// session's own model is asked instead. Other errors may clear on their own.
+export function isUnavailable(error: string, status: number | null): boolean {
+  return error === 'model_not_found' || error === 'invalid_request' || error === 'oauth_org_not_allowed' || status === 403 || status === 404
+}
+
+// How long to leave the model alone after this many failed calls in a row.
+export function backoffMs(failures: number): number {
+  return Math.min(10_000 * 2 ** Math.max(0, failures - 1), 600_000)
 }
 
 // Terminal columns: Hangul, CJK and full-width forms take two.

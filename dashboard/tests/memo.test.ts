@@ -41,6 +41,8 @@ describe('the memo beside the spinner', () => {
     await $.ui.render(spinner('main'))
     expect(drawn.at(-1)).toBe('… · Push kernel to Kaggle')
 
+    // The model is asked once the command has run a moment.
+    await clock.advance(1_500)
     answer()
     await clock.advance(0)
     await $.ui.render(spinner('main'))
@@ -69,6 +71,175 @@ describe('the memo beside the spinner', () => {
     await $.ui.render(spinner('main'))
     expect(drawn.at(-1)).toBe('…')
   })
+
+  test('a subagent\'s spinner shows only its own memo, even before it runs a command', async ($, on) => {
+    const clock = mock.clock(on)
+    on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('model.complete', () => new Promise(() => undefined))
+
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    await $.agent.spawn({
+      tool_use_id: 't1',
+      prompt: '테스트 고치기',
+      description: '테스트 고치기',
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'opus',
+      background: true,
+      fork: false,
+    } as never)
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests.' })
+    await clock.advance(0)
+    await $.ui.render(spinner('a1'))
+    expect(drawn.at(-1)).toBe('…')
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Run tests')
+  })
+
+  test('a turn that ends clears the memos of its own loop only', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('model.complete', () => new Promise(() => undefined))
+    on('turn.complete', () => ({ text: '' }))
+
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests.' })
+    void $.tool.call({ tool: 'Bash', command: 'npm run lint', description: 'Lint.', agentId: 'a1' } as never)
+    await clock.advance(0)
+
+    await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'x', agentId: 'a1', reason: 'answer' } as never)
+    await $.ui.render(spinner('a1'))
+    expect(drawn.at(-1)).toBe('…')
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Run tests')
+
+    await $.turn.complete({ answer: '끝', durationMs: 1000, isAborted: false, turnId: 'y', reason: 'answer' } as never)
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('…')
+  })
+
+  test('a new session starts with no memos', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('model.complete', () => new Promise(() => undefined))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('command.register', ($, e) => ({ value: { command: e.name } }))
+    on('tool.register', ($, e) => ({ value: { tool: e.name } }))
+
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests.' })
+    await clock.advance(0)
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · Run tests')
+
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('…')
+  })
+
+  test('a command that ends before the memo is due asks no model', async ($, on) => {
+    const clock = mock.clock(on)
+    let finish: () => void = () => undefined
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (finish = () => resolve(DONE))))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: true, text: '파일 찾는 중', usage: USAGE } }
+    })
+
+    const call = $.tool.call({ tool: 'Bash', command: 'grep -rn TODO src', description: 'Find TODOs' })
+    await clock.advance(100)
+    finish()
+    await call
+    await clock.advance(5_000)
+    expect(asked).toBe(0)
+  })
+
+  test('a session with nobody at the prompt makes no memo', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: true, text: '학습 돌리는 중', usage: USAGE } }
+    })
+
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('command.register', () => ({ value: { command: 'dashboard' } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__dashboard__signal' } }))
+
+    await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+    void $.tool.call({ tool: 'Bash', command: 'python3 headless.py', description: 'Train' })
+    await clock.advance(5_000)
+    expect(asked).toBe(0)
+  })
+
+  test('a model this account cannot use gives way to the session\'s own', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('session.model', () => ({ value: 'session-model' }))
+    const models: string[] = []
+    on('model.complete', ($, e) => {
+      models.push(e.model)
+      return e.model === 'session-model'
+        ? { value: { isAnswered: true, text: '테스트 실행 중', usage: USAGE } }
+        : { value: { isAnswered: false, reason: 'api-error', status: 404, error: 'model_not_found', usage: USAGE } }
+    })
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' })
+    await clock.advance(1_500)
+    await clock.advance(0)
+    expect(models).toEqual(['haiku', 'session-model'])
+    await $.ui.render(spinner('main'))
+    expect(drawn.at(-1)).toBe('… · 테스트 실행 중')
+  })
+
+  test('a busy model is left alone a while, not asked for every command', async ($, on) => {
+    const clock = mock.clock(on)
+    const finishers: (() => void)[] = []
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => finishers.push(() => resolve(DONE))))
+    let asked = 0
+    on('model.complete', () => {
+      asked += 1
+      return { value: { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: USAGE } }
+    })
+    const run = async (command: string) => {
+      const call = $.tool.call({ tool: 'Bash', command, description: 'Build' })
+      await clock.advance(1_500)
+      finishers.shift()?.()
+      await call
+    }
+
+    await run('make one')
+    expect(asked).toBe(1)
+    await run('make two')
+    await run('make three')
+    expect(asked).toBe(1)
+    await clock.advance(10_000)
+    await run('make four')
+    expect(asked).toBe(2)
+  })
 })
 
 describe('helpers', () => {
@@ -92,6 +263,29 @@ describe('helpers', () => {
     expect(masked).not.toContain('hunter2')
     expect(masked).not.toContain('ghp_abcdefghijkl')
     expect(masked).toContain('KAGGLE_API_TOKEN=***')
+  })
+
+  test('common secret shapes in URLs, flags, headers and env names are hidden', () => {
+    const hidden: [string, string][] = [
+      ['psql postgres://admin:hunter2@db/app', 'hunter2'],
+      ['clone https://oauth2:glpat-xxx@gitlab.com/a/b', 'glpat-xxx'],
+      ['curl -u admin:hunter2 https://x', 'hunter2'],
+      ['mysql -u root -phunter2 app', 'hunter2'],
+      ['sshpass -p hunter2 ssh host', 'hunter2'],
+      ['curl -H "X-Api-Key: abc999" https://x', 'abc999'],
+      ['curl -H "Authorization: Basic dXNlcjpwdw" https://x', 'dXNlcjpwdw'],
+      ['curl -H "Authorization: token ghx12" https://x', 'ghx12'],
+      ['DB_PASS=hunter2 ./run', 'hunter2'],
+      ['PRIVATE_KEY=zzz111 ./run', 'zzz111'],
+      ['OPENAI_KEY=zzz111 ./run', 'zzz111'],
+      ['secret wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY end', 'wJalrXUtnFEMI'],
+    ]
+    for (const [input, secret] of hidden) expect(mask(input)).not.toContain(secret)
+  })
+
+  test('ordinary commands are left alone', () => {
+    for (const input of ['push -u origin main', 'mysql -P 3306 -h db app', 'ls /home/user/project/src/components', 'npm run build --port 80'])
+      expect(mask(input)).toBe(input)
   })
 
   test('answers and descriptions are cleaned to one short line', () => {

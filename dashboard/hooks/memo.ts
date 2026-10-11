@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { RunningShell } from '../types'
-import { mask, truncate, width } from './text'
+import { backoffMs, isUnavailable, mask, truncate, width } from './text'
 
 // The memo beside the spinner. Its session.start, agent.spawn and turn.complete
 // work is done in register.tsx, which hooks those events for both views.
@@ -11,11 +11,16 @@ import { mask, truncate, width } from './text'
 const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
 // Ids of the subagents seen, so a spinner's requestId tells its loop.
 const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
+// Whether a person is at the prompt (register.tsx writes it at session.start):
+// a `-p` run or the SDK draws no spinner, so it gets no memo.
+const interactive = atom({ plugin: 'dashboard', key: 'interactive' } as const, true)
 
 // The spinner line keeps this much room for what the engine draws after the
 // memo: the icon, the ellipsis and "(7m 45s · ↓ 3.2k tokens · esc to interrupt)".
 const RESERVED_COLUMNS = 52
 const CACHE_SIZE = 200
+// A command that ends sooner than this gets no memo: it would end before the memo came.
+const MEMO_DELAY_MS = 1_500
 
 const SYSTEM = [
   '터미널 명령이 지금 무엇을 하는지 개발자가 아닌 사람에게 알려 주는 아주 짧은 메모를 쓴다.',
@@ -31,6 +36,9 @@ const SYSTEM = [
 const memos = new Map<string, string>()
 // The session's model, once the organization refused the preferred one.
 let fallback: string | undefined
+// Failed calls in a row, and until when the model is left alone after them.
+let failures = 0
+let pausedUntil = 0
 
 export const register: Register = (on, options) => {
   const preferred = typeof options.model === 'string' && options.model !== '' ? options.model : 'haiku'
@@ -46,19 +54,25 @@ export const register: Register = (on, options) => {
     const shell: RunningShell = { id, agentId, memo: known ?? cleanDescription(e.description) }
     await update($, shells, list => [...list.filter(one => one.id !== id), shell])
 
-    if (known === undefined) {
-      void explain($, preferred, e.command, e.description)
-        .then(async memo => {
-          if (memo === undefined) return
-          remember(e.command, memo)
-          await update($, shells, list => list.map(one => (one.id === id ? { ...one, memo } : one)))
-        })
-        .catch(() => undefined)
-    }
+    const timer =
+      known === undefined
+        ? $.clock.after(MEMO_DELAY_MS, async () => {
+            try {
+              if (!(await read($, interactive))) return
+              const memo = await explain($, preferred, e.command, e.description)
+              if (memo === undefined) return
+              remember(e.command, memo)
+              await update($, shells, list => list.map(one => (one.id === id ? { ...one, memo } : one)))
+            } catch {
+              // No memo this time: Claude's description stays.
+            }
+          })
+        : undefined
 
     try {
       return await next(e)
     } finally {
+      timer?.cancel()
       await update($, shells, list => list.filter(one => one.id !== id))
     }
   })
@@ -95,6 +109,7 @@ async function complete($: EngineInterface, model: string, prompt: string) {
 
 // The Korean memo for one command, or undefined when no model answered.
 async function explain($: EngineInterface, preferred: string, command: string, description: string | undefined) {
+  if ((await $.clock.now()) < pausedUntil) return undefined
   const prompt = `명령:\n${mask(command).slice(0, 2_000)}\n\nClaude가 붙인 설명: ${mask(description?.trim() || '(없음)')}`
   let answer
   try {
@@ -105,7 +120,20 @@ async function explain($: EngineInterface, preferred: string, command: string, d
     fallback = await $.session.model()
     answer = await complete($, fallback, prompt)
   }
-  return answer.isAnswered ? cleanMemo(answer.text) : undefined
+  // A model this account cannot use answers an error rather than refusing: use the session's too.
+  if (!answer.isAnswered && answer.reason === 'api-error' && fallback === undefined && isUnavailable(answer.error, answer.status)) {
+    fallback = await $.session.model()
+    answer = await complete($, fallback, prompt)
+  }
+  if (!answer.isAnswered && answer.reason === 'api-error') {
+    // Busy or failing: wait longer after each failure in a row.
+    failures += 1
+    pausedUntil = (await $.clock.now()) + backoffMs(failures)
+    return undefined
+  }
+  if (!answer.isAnswered) return undefined
+  failures = 0
+  return cleanMemo(answer.text)
 }
 
 async function rememberSubagent($: EngineInterface, agentId: string) {
