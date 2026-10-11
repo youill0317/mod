@@ -630,7 +630,7 @@ function trimNumber(value: number): string {
 
 async function record($: EngineInterface, kind: LogEntry['kind'], text: string) {
   const at = await $.clock.now()
-  await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(text, 300) }].slice(-MAX_LOG))
+  await update($, log, list => [...list, { id: (list[list.length - 1]?.id ?? 0) + 1, at, kind, text: excerpt(mask(text), 300) }].slice(-MAX_LOG))
   // A pane nobody sees costs no model call: opening it draws from the whole log.
   if (await paneShown($)) await schedule($, URGENT.has(kind) ? SOON_MS : LATER_MS)
 }
@@ -775,9 +775,9 @@ export function promptFor(
   return [
     size === null ? '' : `창: 가로 ${size.columns}칸, 세로 ${size.rows}줄. 단계 상자는 한 줄에 ${nodesAcross(size.columns)}개쯤 들어간다.`,
     size !== null && previous !== null && previous.fit !== fitOf(size) ? '창 크기가 지난번과 다르다: 새 크기에 맞게 다시 짠다.' : '',
-    said === '' ? '' : `Claude가 알린 지금 단계: ${said}`,
-    `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${item.label} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
-    `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => item.label).join('; ')}`,
+    said === '' ? '' : `Claude가 알린 지금 단계: ${mask(said)}`,
+    `돌아가는 것: ${runs.length === 0 ? '없음' : runs.map(item => `${item.kind === 'agent' ? '서브 에이전트' : '셸'} ${mask(item.label)} (${ageText(at - item.startedAt)}째)`).join('; ')}`,
+    `사용자를 기다리는 것: ${waits.length === 0 ? '없음' : waits.map(item => mask(item.label)).join('; ')}`,
     previous === null ? '' : `지난번 도식: ${JSON.stringify({ now: previous.now, blocks: previous.blocks })}`,
     '기록 (오래된 것부터):',
     ...lines,
@@ -917,7 +917,7 @@ function baseName(path: unknown): string {
 function outputOf(stdout: unknown, stderr: unknown): string {
   const text = [stdout, stderr].filter((part): part is string => typeof part === 'string' && part.trim() !== '').join('\n')
   if (text === '') return ''
-  return mask(text.trim().slice(-240)).replace(/\s+/g, ' ').trim()
+  return mask(text.trim()).slice(-240).replace(/\s+/g, ' ').trim()
 }
 
 /** JSON with sorted keys, so two spellings of one input compare equal. */

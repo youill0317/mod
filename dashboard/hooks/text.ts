@@ -8,6 +8,13 @@ export function mask(text: string): string {
     .replace(/(Bearer\s+)\S+/gi, '$1***')
     .replace(/\b(?:sk|ghp|gho|ghs|github_pat|xox[abprs]|AKIA)[-_A-Za-z0-9]{8,}/g, '***')
     .replace(/\b[A-Za-z0-9_]{32,}\b/g, '***')
+    .replace(/(\b[A-Za-z0-9_]*_(?:KEY|PASS)\s*=\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:\/@]*:)[^\s@\/]+@/gi, '$1***@')
+    .replace(/(\s(?:-u|--user)(?:=|\s+))("[^"]*:[^"]*"|'[^']*:[^']*'|[^\s:]*:\S+)/g, '$1***')
+    .replace(/(\bmysql\w*\b[^|;&\n]*?\s-p)\S+/g, '$1***')
+    .replace(/(\bsshpass\b[^|;&\n]*?\s-p\s*)("[^"]*"|'[^']*'|\S+)/g, '$1***')
+    .replace(/(\b(?:X-[A-Za-z-]*(?:Key|Token|Secret|Auth)[A-Za-z-]*|Api-?Key|(?:Proxy-)?Authorization|Cookie)\s*:\s*)[^"'\n]+/gi, '$1***')
+    .replace(/[A-Za-z0-9+\/=]{32,}/g, found => (/^[/.]/.test(found) || !/[A-Z]/.test(found) || !/[a-z]/.test(found) || !/\d/.test(found) || !/[+\/=]/.test(found) ? found : '***'))
 }
 
 // Terminal columns: Hangul, CJK and full-width forms take two.
