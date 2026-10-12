@@ -15,9 +15,12 @@ const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
 // a `-p` run or the SDK draws no spinner, so it gets no memo.
 const interactive = atom({ plugin: 'dashboard', key: 'interactive' } as const, true)
 
-// The spinner line keeps this much room for what the engine draws after the
-// memo: the icon, the ellipsis and "(7m 45s · ↓ 3.2k tokens · esc to interrupt)".
-const RESERVED_COLUMNS = 52
+// The rest of the spinner line, as the engine reckons it: the icon (2), its own
+// slack with the parentheses (5) and one more column, the time up to "1h 23m 45s"
+// (10), " · " and the tokens up to "↓ 123.4k tokens" (15). The engine keeps the
+// time and tokens only while the line leaves them this much, and draws no
+// "esc to interrupt" there any more.
+const RESERVED_COLUMNS = 36
 const CACHE_SIZE = 200
 // A command that ends sooner than this gets no memo: it would end before the memo came.
 const MEMO_DELAY_MS = 1_500
@@ -102,11 +105,12 @@ export const register: Register = (on, options) => {
     if (shown.length === 0) return next(e)
 
     const head = e.props.message ?? e.props.word
-    const room = (e.viewport?.columns ?? 100) - width(head) - RESERVED_COLUMNS
+    const lead = `${e.props.suffix} · `
+    const room = (e.viewport?.columns ?? 100) - width(head) - width(lead) - RESERVED_COLUMNS
     const memo = fit(shown, room)
     if (memo === '') return next(e)
 
-    return next({ ...e, props: { ...e.props, suffix: `${e.props.suffix} · ${memo}` } })
+    return next({ ...e, props: { ...e.props, suffix: lead + memo } })
   })
 }
 

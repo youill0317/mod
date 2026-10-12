@@ -269,6 +269,24 @@ describe('the memo beside the spinner', () => {
     await clock.advance(5_000)
     expect(asked).toBe(0)
   })
+
+  test('a memo is cut only where the time and tokens would lose their room', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    const drawn: string[] = []
+    on('ui.render', { component: 'Spinner' }, ($, e) => {
+      drawn.push(e.props.suffix)
+      return ENGINE
+    })
+
+    void $.tool.call({ tool: 'Bash', command: 'python3 fetch.py', description: '체크포인트를 Drive에서 받는 중' })
+    await clock.advance(0)
+    // 80 columns: "Sauteing" (8), "… · " (4) and the 36 the engine keeps leave 32.
+    await $.ui.render({ ...spinner('main'), viewport: { columns: 80, rows: 40 } })
+    expect(drawn.at(-1)).toBe('… · 체크포인트를 Drive에서 받는 중')
+    await $.ui.render({ ...spinner('main'), viewport: { columns: 70, rows: 40 } })
+    expect(drawn.at(-1)).toBe('… · 체크포인트를 Drive에…')
+  })
 })
 
 describe('helpers', () => {
