@@ -1,6 +1,6 @@
 {
   "name": "dashboard",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Two views of the session's work: a short plain-Korean memo of the running shell command beside the working spinner, and /dashboard, a pane a model of its own designs from the session: what runs and waits on you, then a view it composes for the work.",
   "author": {
     "name": "youill0317"

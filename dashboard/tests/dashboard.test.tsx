@@ -780,10 +780,27 @@ describe('drawing the materials', () => {
     expect(draw('체크포인트를 Kaggle 데이터셋으로 올리는 중', 20)).toEqual(['체크포인트를 Kaggle…'])
   })
 
-  test('the blocks that fit are kept in order; the first always is, cut to the room', () => {
+  test('the blocks that fit are kept in order; one too tall gives way to the ones after it', () => {
     const view = parseView([{ t: 'col', c: ['1', '2', '3'] }, '4', '5'])
     expect(fitView(view, 20, 6, t => t).map(text)).toEqual([['1', '2', '3'], ['4']])
-    expect(fitView(view, 20, 2, t => t).map(text)).toEqual([['1', '…']])
+    expect(fitView(view, 20, 2, t => t).map(text)).toEqual([['4']])
+    expect(fitView(parseView([{ t: 'col', c: ['1', '2', '3'] }, { t: 'col', c: ['4', '5', '6'] }, '7']), 20, 6, t => t).map(text)).toEqual([['1', '2', '3'], ['7']])
+  })
+
+  test('when no block fits whole, the first is cut to the room', () => {
+    expect(fitView(parseView([{ t: 'col', c: ['1', '2', '3'] }]), 20, 2, t => t).map(text)).toEqual([['1', '…']])
+  })
+
+  test('emoji take two columns, so boxes holding them stay square and inside the pane', () => {
+    expect(draw({ t: 'box', c: ['✅ 완료', '🛠️ 수정', '👩‍💻 검토', '● 지금'] }, 40)).toEqual([
+      '╭─────────╮',
+      '│ ✅ 완료 │',
+      '│ 🛠️ 수정 │',
+      '│ 👩‍💻 검토 │',
+      '│ ● 지금  │',
+      '╰─────────╯',
+    ])
+    expect(draw('🎯 목표: 대시보드 잘림 고치기', 20)).toEqual(['🎯 목표: 대시보드 …'])
   })
 
   test('time marks are filled from the log, and a mark naming no entry is dropped', () => {
