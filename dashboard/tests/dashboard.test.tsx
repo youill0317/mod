@@ -523,6 +523,56 @@ describe('the progress dashboard', () => {
     expect(asked).toBe(2)
   })
 
+  test('the pane says the model is reading, and says why a call failed instead of staying blank', async ($, on) => {
+    const clock = mock.clock(on)
+    let reply: (value: never) => void = () => undefined
+    on('model.complete', ($, e) => (own(e) ? new Promise(resolve => (reply = resolve)) : answering('메모 중')))
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('session.messages', () => ({ value: [{ role: 'user', text: '학습 돌려줘', toolUses: [] }] }))
+    on('tool.call', { tool: 'TodoWrite' as never }, () => ({ result: {} }))
+
+    await $.tool.call({ tool: 'TodoWrite', todos: TODOS } as never)
+    await clock.advance(2_000)
+    await clock.advance(10_000)
+    const reading = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await reading.find({ type: 'Text', text: /^대시보드 모델이 세션을 읽는 중… \d+초째$/ })).toBeDefined()
+    await reading.unmount()
+
+    // An answer cut off mid-JSON: nothing to draw, and the pane says so.
+    reply({ value: { isAnswered: true, text: '{"notes":"목표', usage: USAGE } } as never)
+    await clock.advance(0)
+    const failed = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await failed.find({ type: 'Text', text: '모델 응답을 받지 못함 (응답을 읽지 못함) · 곧 다시 시도' })).toBeDefined()
+    await failed.unmount()
+  })
+
+  test('a first read that fails is tried again smaller, and a long answer has room', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: { prompt: string; maxTokens: unknown }[] = []
+    on('model.complete', ($, e) => {
+      if (own(e)) asked.push({ prompt: e.prompt, maxTokens: (e as { maxTokens?: unknown }).maxTokens })
+      return { value: { isAnswered: false as const, reason: 'aborted' as const, usage: USAGE } }
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    const long = Array.from({ length: 400 }, (_, i) => ({ role: 'user' as const, text: `요청 ${i} ${'가'.repeat(200)}`, toolUses: [] as [] }))
+    on('session.messages', () => ({ value: long }))
+    on('tool.call', { tool: 'TodoWrite' as never }, () => ({ result: {} }))
+
+    await $.tool.call({ tool: 'TodoWrite', todos: TODOS.slice(0, 1) } as never)
+    await clock.advance(2_000)
+    await clock.advance(20_000)
+    await $.tool.call({ tool: 'TodoWrite', todos: TODOS.slice(0, 2) } as never)
+    await clock.advance(30_000)
+
+    expect(asked).toHaveLength(2)
+    expect(asked[0]!.maxTokens).toBe(32_000)
+    // The second first read takes half as much of the conversation.
+    expect(asked[1]!.prompt.length).toBeLessThan(asked[0]!.prompt.length * 0.6)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^모델 응답을 받지 못함 \(시간 초과\)/ })).toBeDefined()
+    await ui.unmount()
+  })
+
   test('the dashboard model thinks hard: effort high', async ($, on) => {
     const clock = mock.clock(on)
     const efforts: unknown[] = []

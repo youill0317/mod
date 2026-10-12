@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { LogEntry, Notes, PaneSize, RunningItem, Tone, WaitingItem } from '../types'
-import { AGENT_BUDGET, condense, FIRST_BUDGET, NEXT_BUDGET, nextPlan, parseAnswer, planLine, promptFor } from './context'
+import { AGENT_BUDGET, condense, FIRST_BUDGET, LEAST_FIRST_BUDGET, NEXT_BUDGET, nextPlan, parseAnswer, planLine, promptFor } from './context'
 import type { Message } from './context'
 import { register as memo, withSubagent } from './memo'
 import { backoffMs, isUnavailable, mask, truncate, width } from './text'
@@ -21,6 +21,7 @@ const hint = atom({ plugin: 'dashboard', key: 'hint' } as const, '')
 const ask = atom({ plugin: 'dashboard', key: 'ask' } as const, '')
 const now = atom({ plugin: 'dashboard', key: 'now' } as const, 0)
 const pane = atom({ plugin: 'dashboard', key: 'pane' } as const, null)
+const status = atom({ plugin: 'dashboard', key: 'status' } as const, { kind: 'idle', reason: '', since: 0 })
 // The memo's values (memo.ts), for the events hooked here for both views.
 const shells = atom({ plugin: 'dashboard', key: 'shells' } as const, [])
 const subagents = atom({ plugin: 'dashboard', key: 'subagents' } as const, [])
@@ -92,6 +93,8 @@ let again = false
 let compacted = false
 // Whether the next summary is drawn even with nothing new (`/dashboard refresh`, a new hint).
 let forced = false
+// How much of the conversation the first read takes: halved after each first read that fails.
+let firstBudget = FIRST_BUDGET
 // The pane size the render hook last reported, so a redraw at the same size reports nothing.
 let seen = ''
 // Calls in flight, by loop (null for the main one), to tell which one a permission dialog is for.
@@ -114,6 +117,8 @@ export const register: Register = (on, options) => {
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
     await update($, waiting, () => [])
     await update($, shells, () => [])
+    // A call the old module was making is gone with it.
+    await update($, status, old => (old.kind === 'reading' ? { kind: 'idle' as const, reason: '', since: 0 } : old))
     await update($, interactive, () => e.isInteractive)
     $.clock.every(TICK_MS, () => tick($))
     return next(e)
@@ -335,8 +340,18 @@ export const register: Register = (on, options) => {
     ]
     const topRows = top.length + top.filter(item => item.last !== '').length
 
+    // Where the model stands, while nothing else says it: reading before its first view, or failed.
+    const state = await read($, status)
+    const note =
+      state.kind === 'failed'
+        ? { text: `모델 응답을 받지 못함 (${state.reason}) · 곧 다시 시도`, color: 'warning' }
+        : state.kind === 'reading' && (written?.view.length ?? 0) === 0
+          ? { text: `대시보드 모델이 세션을 읽는 중… ${ageText(at - state.since)}째`, color: undefined }
+          : undefined
+    const above = topRows + (note === undefined ? 0 : 1 + (topRows > 0 ? 1 : 0))
+
     // Below it, the model's view: as many of its blocks as the pane holds, the most important first.
-    const room = rows - topRows - (topRows > 0 ? 1 : 0)
+    const room = rows - above - (above > 0 ? 1 : 0)
     const blocks = fitView(written?.view ?? [], columns, room, stamper(byId, at, ageText))
 
     return (
@@ -350,8 +365,13 @@ export const register: Register = (on, options) => {
             {item.last !== '' && <Text dimColor>{truncate(`  └ ${item.last}`, columns)}</Text>}
           </Box>
         ))}
+        {note !== undefined && (
+          <Box marginTop={top.length === 0 ? 0 : 1}>
+            <Text color={note.color} dimColor={note.color === undefined}>{truncate(note.text, columns)}</Text>
+          </Box>
+        )}
         {blocks.map((lines, i) => (
-          <Box flexDirection="column" marginTop={i === 0 && top.length === 0 ? 0 : 1}>
+          <Box flexDirection="column" marginTop={i === 0 && top.length === 0 && note === undefined ? 0 : 1}>
             {lines.map(line => drawLine(Box, Text, line))}
           </Box>
         ))}
@@ -435,7 +455,7 @@ async function paneShown($: EngineInterface): Promise<boolean> {
 }
 
 async function tick($: EngineInterface) {
-  const busyNow = (await read($, running)).length > 0 || (await read($, waiting)).length > 0
+  const busyNow = (await read($, running)).length > 0 || (await read($, waiting)).length > 0 || (await read($, status)).kind === 'reading'
   if (busyNow && (await paneShown($))) {
     const at = await $.clock.now()
     await update($, now, () => at)
@@ -481,17 +501,28 @@ async function summarize($: EngineInterface) {
         project: known === null ? await projectIntro($) : '',
         log: entries.slice(-LOG_FOR_MODEL),
         // The first time, the whole conversation (cut in the middle): the notes start from it.
-        conversation: condense(messages.slice(from), known === null ? FIRST_BUDGET : NEXT_BUDGET, from),
+        conversation: condense(messages.slice(from), known === null ? firstBudget : NEXT_BUDGET, from),
         compacted,
         previous,
         at,
       },
       ageText,
     )
-    const text = await complete($, prompt)
-    if (text === undefined) return
-    const answer = parseAnswer(text)
-    if (answer === undefined) return
+    await update($, status, () => ({ kind: 'reading' as const, reason: '', since: at }))
+    const reply = await complete($, prompt)
+    const answer = 'text' in reply ? parseAnswer(reply.text) : undefined
+    if (answer === undefined) {
+      // Never silent: the pane says the call failed and why, and the model is left alone a while.
+      failures += 1
+      const failedAt = await $.clock.now()
+      pausedUntil = failedAt + backoffMs(failures)
+      // A first read too big to answer is tried again smaller.
+      if (known === null) firstBudget = Math.max(LEAST_FIRST_BUDGET, Math.floor(firstBudget / 2))
+      await update($, status, () => ({ kind: 'failed' as const, reason: 'failed' in reply ? reply.failed : '응답을 읽지 못함', since: failedAt }))
+      return
+    }
+    failures = 0
+    await update($, status, () => ({ kind: 'idle' as const, reason: '', since: 0 }))
 
     compacted = false
     forced = false
@@ -626,32 +657,36 @@ async function earlierNotes($: EngineInterface, root: string, at: number): Promi
   }
 }
 
-async function complete($: EngineInterface, prompt: string): Promise<string | undefined> {
-  const asking = (model: string) =>
-    $.model.complete({ model, system: [{ text: SYSTEM, cache: true }], prompt, maxTokens: 8_000, effort: 'high', timeoutMs: 120_000 })
+// High effort thinks at length before it answers: the cap leaves room for the
+// thinking and the whole JSON after it, so the answer is never cut mid-way.
+const MAX_TOKENS = 32_000
+const TIMEOUT_MS = 240_000
+
+/** The model's text, or why there is none, in words for the pane. */
+async function complete($: EngineInterface, prompt: string): Promise<{ text: string } | { failed: string }> {
+  const asking = (model: string) => $.model.complete({ model, system: [{ text: SYSTEM, cache: true }], prompt, maxTokens: MAX_TOKENS, effort: 'high', timeoutMs: TIMEOUT_MS })
   let answer
   try {
-    answer = await asking(fallback ?? preferred)
+    try {
+      answer = await asking(fallback ?? preferred)
+    } catch {
+      // The organization may not allow the preferred model: use the session's.
+      if (fallback !== undefined) return { failed: '모델 호출이 거부됨' }
+      fallback = await $.session.model()
+      answer = await asking(fallback)
+    }
+    // A model this account cannot use answers an error rather than refusing: use the session's too.
+    if (!answer.isAnswered && answer.reason === 'api-error' && fallback === undefined && isUnavailable(answer.error, answer.status)) {
+      fallback = await $.session.model()
+      answer = await asking(fallback)
+    }
   } catch {
-    // The organization may not allow the preferred model: use the session's.
-    if (fallback !== undefined) return undefined
-    fallback = await $.session.model()
-    answer = await asking(fallback)
+    return { failed: '모델 호출이 거부됨' }
   }
-  // A model this account cannot use answers an error rather than refusing: use the session's too.
-  if (!answer.isAnswered && answer.reason === 'api-error' && fallback === undefined && isUnavailable(answer.error, answer.status)) {
-    fallback = await $.session.model()
-    answer = await asking(fallback)
-  }
-  if (!answer.isAnswered && answer.reason === 'api-error') {
-    // Busy or failing: wait longer after each failure in a row.
-    failures += 1
-    pausedUntil = (await $.clock.now()) + backoffMs(failures)
-    return undefined
-  }
-  if (!answer.isAnswered) return undefined
-  failures = 0
-  return answer.text
+  if (answer.isAnswered) return { text: answer.text }
+  if (answer.reason === 'api-error') return { failed: `API 오류 ${answer.status ?? ''} ${answer.error}`.replace(/\s+/g, ' ').trim() }
+  if (answer.reason === 'aborted') return { failed: '시간 초과' }
+  return { failed: '빈 응답' }
 }
 
 async function startShell($: EngineInterface, id: string, input: Record<string, unknown>): Promise<number> {

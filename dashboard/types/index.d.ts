@@ -104,6 +104,9 @@ export type Notes = {
   key: string
 }
 
+/** Where the dashboard's model stands: idle, reading the session now, or its last call failed and why. */
+export type ModelStatus = { kind: 'idle' | 'reading' | 'failed'; reason: string; since: number }
+
 /** The pane's body as last drawn: cells across, rows down. */
 export type PaneSize = { columns: number; rows: number }
 
@@ -122,6 +125,8 @@ declare module 'claude-code' {
       ask: string
       now: number
       pane: PaneSize | null
+      /** Where the dashboard's model stands, shown while nothing else would say it. */
+      status: ModelStatus
       /** The memo beside the spinner: the foreground shells running now. */
       shells: RunningShell[]
       /** Ids of the subagents seen, so a spinner's requestId tells its loop. */

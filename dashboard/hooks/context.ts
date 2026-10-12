@@ -16,8 +16,10 @@ export type Message = {
 }
 
 // How much of the conversation one call reads: all of it, cut in the middle,
-// the first time (the notes start from it), and what is new after that.
-export const FIRST_BUDGET = 60_000
+// the first time (the notes start from it), and what is new after that. A
+// first read that fails is tried again smaller, down to the least.
+export const FIRST_BUDGET = 40_000
+export const LEAST_FIRST_BUDGET = 10_000
 export const NEXT_BUDGET = 16_000
 export const AGENT_BUDGET = 3_000
 const NOTES_MAX = 2_000
