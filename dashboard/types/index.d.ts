@@ -8,13 +8,14 @@ export type RunningShell = {
   memo: string
 }
 
-/** One thing that happened in the session, as the dashboard keeps it. */
+/** One thing that happened in the session, as the dashboard keeps it: what the model cites for time. */
 export type LogEntry = {
   id: number
   at: number
   kind:
     | 'prompt'
-    | 'signal'
+    | 'said'
+    | 'plan'
     | 'shell'
     | 'shell-done'
     | 'shell-failed'
@@ -43,6 +44,8 @@ export type RunningItem = {
   taskId: string | null
   /** A subagent's latest step. */
   last: string
+  /** Where a background shell writes, when the engine said: its tail is read for the model. */
+  output?: string
 }
 
 /** Something that waits on the person. */
@@ -53,35 +56,52 @@ export type WaitingItem = {
   since: number
 }
 
-/** A bar's color, as the small model gives it. */
-export type Tone = 'normal' | 'good' | 'warn' | 'bad'
+/** One step of Claude's own plan (its todo list or tasks), as it last wrote it. */
+export type PlanItem = {
+  id: string
+  text: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
 
-/** A node's state, drawn as its border and symbol. */
-export type NodeState = 'done' | 'now' | 'todo' | 'failed' | 'wait'
+/** A color the model gives a piece of the view. */
+export type Tone = 'normal' | 'dim' | 'accent' | 'good' | 'warn' | 'bad'
 
-/** A step that hangs under a stage: a failure, a retry, a wait, a side task. */
-export type GraphBranch = { label: string; state: NodeState; note: string; back: boolean }
+/**
+ * The materials the model builds the view from: no diagram kinds, only pieces
+ * it composes. Widths, wrapping and fitting the pane are the mod's.
+ */
+export type ViewNode =
+  | { t: 'text'; v: string; tone: Tone; bold: boolean }
+  | { t: 'row'; gap: number; c: ViewNode[] }
+  | { t: 'col'; gap: number; c: ViewNode[] }
+  | { t: 'box'; style: 'round' | 'bold' | 'dashed' | 'double'; tone: Tone; title: string; c: ViewNode[] }
+  | { t: 'arrow'; dir: 'right' | 'left' | 'down' | 'up'; tone: Tone; label: string }
+  | { t: 'bar'; value: number; max: number; tone: Tone; w: number }
+  | { t: 'spark'; values: number[]; tone: Tone }
+  | { t: 'table'; head: string[]; rows: string[][]; tone: Tone }
+  | { t: 'rule'; tone: Tone }
 
-/** One stage of the work's main path, with what hangs under it; `from` is the log entry it began at. */
-export type GraphNode = { label: string; state: NodeState; note: string; branches: GraphBranch[]; from: number }
-
-/** A diagram below the top lines; `from` is the log entry a stage began or a value was seen at, 0 for none. */
-export type SummaryBlock =
-  | { kind: 'graph'; nodes: GraphNode[] }
-  | { kind: 'bars'; items: { label: string; value: number; max: number; tone: Tone; from: number }[] }
-  /** The graph's stages on one time axis, measured from the log entries they began at. */
-  | { kind: 'time'; items: { label: string; state: NodeState; from: number }[] }
-
-/** What the small model drew from the log. */
+/** What the dashboard model drew from the session. */
 export type Summary = {
   /** The work now, the first line at the top. */
   now: string
+  /** What the person must decide, as the model read it; '' for nothing. */
+  ask: string
   /** Most important first: what does not fit the pane is cut from the end. */
-  blocks: SummaryBlock[]
+  view: ViewNode[]
   /** The last log id this summary covers. */
   covers: number
   /** The pane size class it was laid out for (fitOf); another one lays it out again. */
   fit: string
+}
+
+/** The dashboard model's own notes on the work, so it needs no more than what is new. */
+export type Notes = {
+  text: string
+  /** How many messages of the main conversation the notes have taken in. */
+  upTo: number
+  /** The last message taken in, to find it again once older ones scroll out or the conversation is compacted. */
+  key: string
 }
 
 /** The pane's body as last drawn: cells across, rows down. */
@@ -94,8 +114,11 @@ declare module 'claude-code' {
       running: RunningItem[]
       waiting: WaitingItem[]
       summary: Summary | null
-      phase: string
-      /** What Claude said the person must decide, until they write. */
+      notes: Notes | null
+      plan: PlanItem[]
+      /** What the person asked the dashboard to look at (`/dashboard <words>`). */
+      hint: string
+      /** What the person must decide, until they write. */
       ask: string
       now: number
       pane: PaneSize | null

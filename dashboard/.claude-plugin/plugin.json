@@ -1,7 +1,7 @@
 {
   "name": "dashboard",
-  "version": "0.5.1",
-  "description": "Two views of the session's work: a short plain-Korean memo of the running shell command beside the working spinner, and /dashboard, a pane of what runs and waits on you with diagrams of the stages, progress and time.",
+  "version": "0.6.0",
+  "description": "Two views of the session's work: a short plain-Korean memo of the running shell command beside the working spinner, and /dashboard, a pane a model of its own designs from the session: what runs and waits on you, then a view it composes for the work.",
   "author": {
     "name": "youill0317"
   },
@@ -10,7 +10,7 @@
     "model": {
       "type": "string",
       "title": "Model",
-      "description": "Model that writes the shell memos and chooses the dashboard's diagrams.",
+      "description": "Model that writes the shell memos and designs the dashboard.",
       "default": "haiku",
       "options": [
         "haiku",
