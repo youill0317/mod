@@ -71,7 +71,7 @@ const SYSTEM = [
   '규칙:',
   '- 실행 중인 셸, 서브 에이전트, 사용자를 기다리는 권한 요청과 질문은 mod가 위에 따로 보여 주니 화면에 다시 넣지 않는다.',
   '- 값을 지어내지 않는다. 수치는 대화, 셸 결과, 로그에 나온 것만 쓰고 언제 본 값인지 {ago:N}을 붙인다.',
-  '- 창 크기에 맞춘다. view는 중요한 것부터 늘어놓고, 창에 넘치는 뒤쪽 블록은 잘린다. 글은 짧은 한국어 구절로 쓴다.',
+  '- 창 크기에 맞춘다. view는 중요한 것부터 늘어놓고, 창에 다 들어가지 않는 블록은 통째로 빠진다. 글은 짧은 한국어 구절로 쓴다.',
   '- 사용자가 대시보드에 바라는 것이 있으면 그것을 가장 먼저 따른다.',
   '- 화면과 노트는 지금 상태를 보여 준다. 끝났거나, 사용자가 거절하거나 취소했거나, 하지 않기로 한 것은 남은 일과 기다림에서 지운다. 거절된 것은 노트의 정한 것에 "하지 않기로 함"으로만 남긴다.',
   '- 기록의 권한 요청과 질문은 뒤에 따라오는 "사용자가 허용함/거절함/답함" 기록으로 끝난 것이다. 지금 기다리는 것은 mod가 위에 보여 준다.',
@@ -319,7 +319,8 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const columns = Math.max(24, e.props.bodyColumns)
+    // Drawn to the body's own width: a floor wider than it would push every line past the edge.
+    const columns = Math.max(1, e.props.bodyColumns)
     // A render never writes state: the size is noted just after, for the next summary.
     const rows = e.props.scroll.bodyRows
     if (`${columns}x${rows}` !== seen) {
@@ -376,8 +377,8 @@ export const register: Register = (on, options) => {
         {top.map(item => (
           <Box flexDirection="column">
             <Box flexDirection="row">
-              <Text color={item.color} bold={item.symbol === CURRENT}>{truncate(`${item.symbol} ${item.text}`, Math.max(8, columns - width(item.age)))}</Text>
-              {item.age !== '' && <Text dimColor>{item.age}</Text>}
+              <Text color={item.color} bold={item.symbol === CURRENT}>{truncate(`${item.symbol} ${item.text}`, columns - width(item.age) >= 8 ? columns - width(item.age) : columns)}</Text>
+              {item.age !== '' && columns - width(item.age) >= 8 && <Text dimColor>{item.age}</Text>}
             </Box>
             {item.last !== '' && <Text dimColor>{truncate(`  └ ${item.last}`, columns)}</Text>}
           </Box>

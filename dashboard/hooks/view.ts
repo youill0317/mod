@@ -278,22 +278,22 @@ export function clip(line: readonly Seg[], room: number): Seg[] {
   return out
 }
 
-/** The view's blocks laid out for the pane: the most important first, as many as fit in `rows`. */
+/**
+ * The view's blocks laid out for the pane, in the model's order, as many as fit
+ * in `rows`: a block too tall for the room left gives way, and the ones after
+ * it that fit still show. When none fits whole, the first is cut to the room.
+ */
 export function fitView(view: readonly ViewNode[], columns: number, rows: number, stamp: (text: string) => string): Seg[][][] {
+  const laid = view.map(node => layout(node, columns, stamp).lines.map(line => clip(line, columns))).filter(lines => lines.length > 0)
   const kept: Seg[][][] = []
   let used = 0
-  for (const node of view) {
-    const laid = layout(node, columns, stamp).lines.map(line => clip(line, columns))
-    if (laid.length === 0) continue
-    const need = (kept.length > 0 ? 1 : 0) + laid.length
-    if (used + need > rows) {
-      // The first block always shows, cut to the room it has.
-      if (kept.length === 0 && rows > 0) kept.push([...laid.slice(0, Math.max(0, rows - 1)), [{ text: '…', tone: 'dim', bold: false }]])
-      break
-    }
-    kept.push(laid)
+  for (const lines of laid) {
+    const need = (kept.length > 0 ? 1 : 0) + lines.length
+    if (used + need > rows) continue
+    kept.push(lines)
     used += need
   }
+  if (kept.length === 0 && laid.length > 0 && rows > 0) kept.push([...laid[0]!.slice(0, rows - 1), [{ text: '…', tone: 'dim', bold: false }]])
   return kept
 }
 

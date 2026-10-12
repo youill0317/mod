@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { cleanDescription, cleanMemo, fit } from '../hooks/memo'
-import { mask, width } from '../hooks/text'
+import { mask, truncate, width } from '../hooks/text'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const ENGINE = { type: 'engine', ref: 0 } as const
@@ -301,6 +301,19 @@ describe('helpers', () => {
   test('Hangul counts two columns', () => {
     expect(width('중')).toBe(2)
     expect(width('ab 중')).toBe(5)
+  })
+
+  test('emoji count as the engine draws them: two, a joined or marked one still two', () => {
+    expect(width('✅')).toBe(2)
+    expect(width('⚠')).toBe(1)
+    expect(width('⚠️')).toBe(2)
+    expect(width('👩‍💻')).toBe(2)
+    expect(width('👍🏽')).toBe(2)
+    expect(width('🇰🇷')).toBe(2)
+    expect(width('1️⃣')).toBe(2)
+    expect(width('e\u0301')).toBe(1)
+    expect(width('✓ ● ○ ◆ ▶ ↻ ◎')).toBe(13)
+    expect(truncate('👩‍💻👩‍💻👩‍💻', 5)).toBe('👩‍💻👩‍💻…')
   })
 
   test('secrets are hidden before the command leaves for the model', () => {
