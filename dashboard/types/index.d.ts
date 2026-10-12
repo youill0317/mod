@@ -26,7 +26,11 @@ export type LogEntry = {
     | 'edit'
     | 'tool'
     | 'permission'
+    /** How a permission request ended: allowed, refused, or cut off. */
+    | 'permission-done'
     | 'question'
+    /** What the person answered a question with, or that they declined it. */
+    | 'question-done'
     | 'answer'
     /** A prompt taken back with Esc before any answer: kept for its id, never shown to the model. */
     | 'withdrawn'

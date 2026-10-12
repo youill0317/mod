@@ -45,7 +45,7 @@ const OPEN_MS = 300
 const EARLIER_MS = 7 * 24 * 3_600_000
 
 // Log kinds that wake the model soon: the work changed phase or waits on the person.
-const URGENT: ReadonlySet<LogEntry['kind']> = new Set(['said', 'plan', 'answer', 'permission', 'question', 'agent-done', 'agent-failed', 'shell-failed', 'background-done'])
+const URGENT: ReadonlySet<LogEntry['kind']> = new Set(['said', 'plan', 'answer', 'permission', 'permission-done', 'question', 'question-done', 'agent-done', 'agent-failed', 'shell-failed', 'background-done'])
 
 const PLANNING = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate'])
 
@@ -73,7 +73,10 @@ const SYSTEM = [
   '- 값을 지어내지 않는다. 수치는 대화, 셸 결과, 로그에 나온 것만 쓰고 언제 본 값인지 {ago:N}을 붙인다.',
   '- 창 크기에 맞춘다. view는 중요한 것부터 늘어놓고, 창에 넘치는 뒤쪽 블록은 잘린다. 글은 짧은 한국어 구절로 쓴다.',
   '- 사용자가 대시보드에 바라는 것이 있으면 그것을 가장 먼저 따른다.',
-  '- 작업이 크게 바뀌지 않았으면 지난번 화면의 구성을 유지하고 값만 고친다.',
+  '- 화면과 노트는 지금 상태를 보여 준다. 끝났거나, 사용자가 거절하거나 취소했거나, 하지 않기로 한 것은 남은 일과 기다림에서 지운다. 거절된 것은 노트의 정한 것에 "하지 않기로 함"으로만 남긴다.',
+  '- 기록의 권한 요청과 질문은 뒤에 따라오는 "사용자가 허용함/거절함/답함" 기록으로 끝난 것이다. 지금 기다리는 것은 mod가 위에 보여 준다.',
+  '- ask는 Claude의 가장 최근 답이 사용자에게 결정을 물었고 사용자가 아직 답하지 않았을 때만 쓴다. 그 밖에는 빈 문자열.',
+  '- 작업이 크게 바뀌지 않았으면 지난번 화면의 모양은 유지하되 내용은 지금 상태로 고친다. 지난 화면이나 노트에 있어도 지금 근거가 없으면 뺀다.',
   '- notes에는 앞의 대화 없이도 다음 번에 이 작업을 이해하는 데 필요한 것을 적는다: 목표와 사용자가 원하는 것, 정한 것, 끝난 일, 남은 일, 막힌 것, 지켜볼 값과 최신 값(기록 번호와 함께). 지난 노트를 고쳐 쓰고 2000자를 넘기지 않는다.',
   'JSON 하나만 출력한다:',
   '{"notes":"...","now":"지금 하는 일, 20자 이내","ask":"사용자가 결정해야 할 것, 없으면 빈 문자열","view":[블록, ...]}',
@@ -131,14 +134,23 @@ export const register: Register = (on, options) => {
       return { text: '대시보드를 닫았습니다.' }
     }
     // Anything else the person writes is what the dashboard should look at.
-    if (asked === 'reset') await update($, hint, () => '')
-    else if (asked !== '' && asked !== 'refresh') await update($, hint, () => asked.slice(0, 300))
+    if (asked === 'reset') {
+      // A fresh start: no hint, and notes written again from the conversation, this project's stored ones gone too.
+      await update($, hint, () => '')
+      await update($, notes, () => null)
+      firstBudget = FIRST_BUDGET
+      try {
+        await $.store.delete(`notes:${await projectRoot($)}`)
+      } catch {
+        // Nothing stored to forget.
+      }
+    } else if (asked !== '' && asked !== 'refresh') await update($, hint, () => asked.slice(0, 300))
     await $.ui.open({ id: PANE, title: '작업 현황' })
     const at = await $.clock.now()
     await update($, now, () => at)
     // A moment for the pane's first draw to note its size, so the summary is laid out for it.
     $.clock.after(OPEN_MS, () => wake($, asked !== ''))
-    if (asked === 'reset') return { text: '대시보드가 알아서 고르도록 되돌렸습니다.' }
+    if (asked === 'reset') return { text: '대시보드를 처음부터 다시 그립니다: 바라는 것과 노트를 지우고 대화를 다시 읽습니다.' }
     if (asked === 'refresh') return { text: '대시보드를 다시 그립니다.' }
     if (asked !== '') return { text: `대시보드가 이것을 중심으로 보여 줍니다: ${asked}` }
     return { text: '작업 현황 대시보드를 열었습니다.' }
@@ -154,19 +166,22 @@ export const register: Register = (on, options) => {
       const step = stepOf(e.tool, input)
       await update($, running, list => list.map(item => (item.id === agentId ? { ...item, last: step } : item)))
       pending.set(id, { tool: e.tool, key: stableKey(input), agentId })
+      let ran: ToolCallResult | undefined
       try {
-        return await next(e)
+        ran = await next(e)
+        return ran
       } finally {
         pending.delete(id)
-        await update($, waiting, list => list.filter(item => item.id !== id))
+        await settle($, id, ran)
       }
     }
 
     pending.set(id, { tool: e.tool, key: stableKey(input), agentId: null })
+    let ran: ToolCallResult | undefined
     try {
       if (e.tool === 'Bash') {
         const startedAt = await startShell($, id, input)
-        const ran = await next(e)
+        ran = await next(e)
         await endShell($, id, input, ran, startedAt)
         return ran
       }
@@ -176,10 +191,11 @@ export const register: Register = (on, options) => {
         const item: WaitingItem = { id, kind: 'question', label, since: await $.clock.now() }
         await update($, waiting, list => [...list, item])
         await record($, 'question', `사용자에게 질문: ${label}`)
-        return await next(e)
+        ran = await next(e)
+        return ran
       }
 
-      const ran = await next(e)
+      ran = await next(e)
       const done = ran.deny === undefined && ran.isError !== true
       // Claude's own plan, read off its planning tools: the dashboard's best outline of the work.
       if (done && PLANNING.has(e.tool)) {
@@ -194,7 +210,7 @@ export const register: Register = (on, options) => {
       return ran
     } finally {
       pending.delete(id)
-      await update($, waiting, list => list.filter(item => item.id !== id))
+      await settle($, id, ran)
     }
   })
 
@@ -269,8 +285,9 @@ export const register: Register = (on, options) => {
       }
       return ended
     }
-    // The main turn ended: nothing of it runs in the foreground any more.
+    // The main turn ended: nothing of it runs in the foreground or waits on the person any more.
     await update($, running, list => list.filter(item => item.kind === 'agent' || item.background))
+    await update($, waiting, list => list.filter(item => pending.get(item.id)?.agentId != null))
     if (e.isAborted) {
       // Esc before any answer or step takes the prompt back out of the conversation, and no
       // event says so: a turn that ended that way takes its prompt off the dashboard too.
@@ -403,6 +420,18 @@ function drawLine(BoxEl: unknown, TextEl: unknown, line: readonly Seg[]): Node {
 }
 
 // ── Recording and waking the model ──────────────────────────────────────────
+
+/**
+ * A call that waited on the person has ended: it waits no more, and the log
+ * says how it ended, so the model never reads a request as still open.
+ */
+async function settle($: EngineInterface, id: string, ran: ToolCallResult | undefined) {
+  const was = (await read($, waiting)).find(item => item.id === id)
+  await update($, waiting, list => list.filter(item => item.id !== id))
+  if (was === undefined) return
+  if (was.kind === 'permission') await record($, 'permission-done', `${permissionOutcome(ran)}: ${was.label}`)
+  else await record($, 'question-done', `${answerOf(ran)} (질문: ${was.label})`)
+}
 
 async function record($: EngineInterface, kind: LogEntry['kind'], text: string) {
   const at = await $.clock.now()
@@ -739,6 +768,22 @@ function shellLabel(input: Record<string, unknown>): string {
   const description = typeof input.description === 'string' ? input.description.trim() : ''
   if (description !== '') return excerpt(description, 80)
   return excerpt(mask(typeof input.command === 'string' ? input.command : ''), 80)
+}
+
+/** How a permission request ended, from the call's result. */
+export function permissionOutcome(ran: ToolCallResult | undefined): string {
+  if (ran === undefined) return '권한 요청이 중단됨'
+  if (ran.deny !== undefined) return '사용자가 거절함'
+  if (ran.isError === true && /reject|denied|doesn't want|don't want|not allowed|거절|거부/i.test(ran.text ?? '')) return '사용자가 거절함'
+  return '사용자가 허용함'
+}
+
+/** What the person answered a question with, from the call's result. */
+export function answerOf(ran: ToolCallResult | undefined): string {
+  if (ran === undefined || ran.deny !== undefined || ran.isError === true) return '사용자가 질문에 답하지 않음'
+  const answers = (ran.result as { answers?: unknown } | undefined)?.answers
+  const said = typeof answers === 'object' && answers !== null ? Object.values(answers as Record<string, unknown>).filter(value => typeof value === 'string' && value !== '') : []
+  return said.length === 0 ? '사용자가 질문에 답함' : `사용자 답: ${excerpt(said.join(' / '), 120)}`
 }
 
 function questionOf(input: Record<string, unknown>): string {

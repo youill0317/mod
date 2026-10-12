@@ -151,6 +151,9 @@ describe('the progress dashboard', () => {
     await clock.advance(1_000)
     expect(asked).toHaveLength(2)
     expect(asked[1]).not.toContain('사용자가 대시보드에 바라는 것')
+    // Reset also forgets the notes: the conversation is read again from the start.
+    expect(asked[1]).not.toContain('지금까지의 노트')
+    expect(asked[1]).toContain('## 대화 (처음부터')
   })
 
   test('what the model reads the person must decide waits at the top until they write', async ($, on) => {
@@ -282,6 +285,63 @@ describe('the progress dashboard', () => {
     await after.unmount()
     finish()
     await call
+  })
+
+  test('a refused permission request leaves the top, and the model reads that it was refused', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      if (own(e)) asked.push(e.prompt)
+      return answering(ANSWER)
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    let refuse: () => void = () => undefined
+    on('tool.call', { tool: 'Bash' }, () => new Promise(resolve => (refuse = () => resolve({ deny: 'The user doesn\'t want to proceed with this tool use.' }))))
+    on('classic.PermissionRequest', () => ({}))
+
+    const call = $.tool.call({ tool: 'Bash', command: 'vercel deploy --prod', description: 'Vercel에 배포' })
+    await clock.advance(0)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'vercel deploy --prod', description: 'Vercel에 배포' } })
+    refuse()
+    await call
+    await clock.advance(2_000)
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
+    await ui.unmount()
+    expect(asked.at(-1)).toContain('권한 요청: Vercel에 배포')
+    expect(asked.at(-1)).toContain('사용자가 거절함: Vercel에 배포')
+  })
+
+  test('what the person answered a question with reaches the model', async ($, on) => {
+    const clock = mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', ($, e) => {
+      if (own(e)) asked.push(e.prompt)
+      return answering(ANSWER)
+    })
+    on('ui.panes', () => ({ value: [SHOWN] }))
+    on('tool.call', { tool: 'AskUserQuestion' }, () => ({ result: { questions: [], answers: { '어느 체크포인트로 이어갈까요?': 'epoch 2' } } }))
+
+    await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: '어느 체크포인트로 이어갈까요?', header: 'Resume', options: [], multiSelect: false }] } as never)
+    await clock.advance(2_000)
+    expect(asked.at(-1)).toContain('사용자 답: epoch 2 (질문: 어느 체크포인트로 이어갈까요?)')
+  })
+
+  test('a main turn that ended waits on the person for nothing', async ($, on) => {
+    const clock = mock.clock(on)
+    on('tool.call', { tool: 'Bash' }, () => new Promise(() => undefined))
+    on('classic.PermissionRequest', () => ({}))
+    on('turn.complete', () => ({ text: '' }))
+
+    void $.tool.call({ tool: 'Bash', command: 'rm -rf build', description: '빌드 폴더 지우기' })
+    await clock.advance(0)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build', description: '빌드 폴더 지우기' } })
+    await $.turn.complete({ answer: '', durationMs: 1000, isAborted: true, turnId: 'x', reason: 'aborted' } as never)
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^◆ / })).toBeUndefined()
+    await ui.unmount()
   })
 
   test('a subagent shows its role and its latest step until it ends', async ($, on) => {
